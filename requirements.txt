@@ -1,1 +1,4 @@
 requests
+streamlit
+folium
+pandas
