@@ -69,22 +69,29 @@ def extract_infrastructure(elements):
                     state = elem.get('tags', {}).get('state', 'Unknown')  # Use state from JSON
                     # Improved track type classification
                     tags = elem.get('tags', {})
-                    usage = tags.get('usage', 'main')
+                    usage = tags.get('usage', '')
                     service = tags.get('service', '')
                     railway = tags.get('railway', 'rail')
+                    electrified = tags.get('electrified', '')
+                    frequency = tags.get('frequency', '')
                     
                     # Determine track importance with better logic
-                    if usage in ['main', 'trunk'] or railway == 'rail':
-                        track_type = 'main'
-                    elif usage in ['branch', 'secondary']:
-                        track_type = 'branch'
-                    elif service in ['siding', 'yard', 'spur']:
+                    # Check service first (these are usually sidings, yards, etc.)
+                    if service in ['siding', 'yard', 'spur', 'crossover']:
                         track_type = 'service'
                     elif usage in ['industrial', 'military']:
                         track_type = 'service'
-                    else:
-                        # Default most tracks to main to ensure better connectivity
+                    elif usage in ['branch', 'secondary']:
+                        track_type = 'branch'
+                    elif usage in ['main', 'trunk']:
                         track_type = 'main'
+                    elif electrified or frequency:  # Electrified tracks are usually main lines
+                        track_type = 'main'
+                    elif usage == '':  # No usage specified, classify based on other hints
+                        # If no specific usage, default to branch to avoid everything being main
+                        track_type = 'branch'
+                    else:
+                        track_type = 'other'
                     
                     infrastructure['tracks'].append({
                         'coords': coords,
@@ -117,24 +124,28 @@ def create_enhanced_map(infrastructure, selected_states):
         # Sort tracks by importance and length to get better coverage
         main_tracks = [t for t in filtered_tracks if t.get('type') == 'main']
         branch_tracks = [t for t in filtered_tracks if t.get('type') == 'branch']
-        other_tracks = [t for t in filtered_tracks if t.get('type') not in ['main', 'branch']]
+        service_tracks = [t for t in filtered_tracks if t.get('type') == 'service']
+        other_tracks = [t for t in filtered_tracks if t.get('type') == 'other']
         
         # Sort by track length (number of coordinate points) to prioritize longer segments
         main_tracks.sort(key=lambda x: len(x.get('coords', [])), reverse=True)
         branch_tracks.sort(key=lambda x: len(x.get('coords', [])), reverse=True)
+        service_tracks.sort(key=lambda x: len(x.get('coords', [])), reverse=True)
         other_tracks.sort(key=lambda x: len(x.get('coords', [])), reverse=True)
         
         # Take more tracks but prioritize longer, more important ones
         sampled_tracks = main_tracks[:800]  # More main tracks
         sampled_tracks.extend(branch_tracks[:800])  # More branch tracks
-        sampled_tracks.extend(other_tracks[:400])  # Some other tracks
+        sampled_tracks.extend(service_tracks[:200])  # Some service tracks
+        sampled_tracks.extend(other_tracks[:200])  # Some other tracks
         
         filtered_tracks = sampled_tracks[:MAX_TRACKS]
     
     # Add tracks with better rendering - group by type for layered display
     main_tracks = [t for t in filtered_tracks if t.get('type') == 'main']
     branch_tracks = [t for t in filtered_tracks if t.get('type') == 'branch']
-    other_tracks = [t for t in filtered_tracks if t.get('type') not in ['main', 'branch']]
+    service_tracks = [t for t in filtered_tracks if t.get('type') == 'service']
+    other_tracks = [t for t in filtered_tracks if t.get('type') == 'other']
     
     # Add main tracks first (bottom layer)
     for track in main_tracks:
@@ -154,13 +165,22 @@ def create_enhanced_map(infrastructure, selected_states):
             opacity=0.7
         ).add_to(m)
     
+    # Add service tracks (sidings, yards)
+    for track in service_tracks:
+        folium.PolyLine(
+            locations=track['coords'],
+            color='#8B4513',
+            weight=2,
+            opacity=0.6
+        ).add_to(m)
+    
     # Add other tracks
     for track in other_tracks:
         folium.PolyLine(
             locations=track['coords'],
             color='#6B8E23',
             weight=2,
-            opacity=0.6
+            opacity=0.5
         ).add_to(m)
     
     # Add infrastructure points on top of tracks
@@ -265,6 +285,7 @@ def add_legend(m):
         </div>
         <p style="margin: 3px 0; color: #2E8B57;"><span style="font-weight: bold; color: #2E8B57;">━━━</span> Main Lines</p>
         <p style="margin: 3px 0; color: #4A7C59;"><span style="font-weight: bold; color: #4A7C59;">━━</span> Branch Lines</p>
+        <p style="margin: 3px 0; color: #8B4513;"><span style="color: #8B4513;">━</span> Service Tracks</p>
         <p style="margin: 3px 0; color: #6B8E23;"><span style="color: #6B8E23;">━</span> Other Tracks</p>
     </div>
     '''
@@ -280,7 +301,6 @@ def main():
     
     st.title("🚂 SamaySetu Railway Network")
     st.markdown("**Interactive visualization of railway infrastructure across South India**")
-    st.markdown("*No coordinate-based state detection - using OSM administrative boundaries*")
     
     # Load data
     try:
@@ -381,9 +401,8 @@ def main():
                 
                 # Map usage guide
                 st.caption("💡 Click markers for details • Different colors represent different infrastructure types • Use sidebar filters to toggle visibility")
-                
-                # Infrastructure search
-                st.subheader("🔍 Infrastructure Search")
+                # Infrastructure search - minimal spacing
+                st.markdown("**🔍 Infrastructure Search**")
                 all_infrastructure_items = []
                 for infra_type, items in filtered_infrastructure.items():
                     for item in items:
@@ -417,6 +436,75 @@ def main():
                                         if 'lat' in item and 'lon' in item:
                                             st.write(f"**Coordinates:** {item['lat']:.4f}, {item['lon']:.4f}")
                                     break
+                
+                # Detailed breakdown
+                if st.expander("📊 Infrastructure Breakdown"):
+                    st.subheader("Station Details")
+                    
+                    all_stations = filtered_infrastructure['stations'] + filtered_infrastructure['major_stations']
+                    major_stations = filtered_infrastructure['major_stations']
+                    regular_stations = filtered_infrastructure['stations']
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Major Stations/Junctions", len(major_stations))
+                        if major_stations:
+                            st.write("**Major Stations/Junctions:**")
+                            for station in major_stations[:15]:  # Show first 15
+                                st.write(f"• {station['name']} ({station['state']})")
+                            if len(major_stations) > 15:
+                                st.write(f"... and {len(major_stations) - 15} more")
+                    
+                    with col2:
+                        st.metric("Regular Stations", len(regular_stations))
+                        if regular_stations:
+                            st.write("**Regular Stations (sample):**")
+                            for station in regular_stations[:15]:  # Show first 15
+                                st.write(f"• {station['name']} ({station['state']})")
+                            if len(regular_stations) > 15:
+                                st.write(f"... and {len(regular_stations) - 15} more")
+                
+                # Data export option
+                if st.checkbox("🗂️ Show Infrastructure Data Tables"):
+                    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Regular Stations", "Major Stations/Junctions", "Signals", "Milestones", "Tracks"])
+                    
+                    with tab1:
+                        if filtered_infrastructure['stations']:
+                            df = pd.DataFrame(filtered_infrastructure['stations'])
+                            st.dataframe(df, use_container_width=True)
+                        else:
+                            st.info("No regular stations found")
+                    
+                    with tab2:
+                        if filtered_infrastructure['major_stations']:
+                            df = pd.DataFrame(filtered_infrastructure['major_stations'])
+                            st.dataframe(df, use_container_width=True)
+                        else:
+                            st.info("No major stations/junctions found")
+                    
+                    with tab3:
+                        if filtered_infrastructure['signals']:
+                            df = pd.DataFrame(filtered_infrastructure['signals'])
+                            st.dataframe(df, use_container_width=True)
+                        else:
+                            st.info("No signals found")
+                    
+                    with tab4:
+                        if filtered_infrastructure['milestones']:
+                            df = pd.DataFrame(filtered_infrastructure['milestones'])
+                            st.dataframe(df, use_container_width=True)
+                        else:
+                            st.info("No milestones found")
+                    
+                    with tab5:
+                        if filtered_infrastructure['tracks']:
+                            # For tracks, show simplified info (coordinates are too complex for dataframe)
+                            track_info = [{'state': t['state'], 'type': t.get('type', 'main'), 'points': len(t['coords'])} 
+                                        for t in filtered_infrastructure['tracks']]
+                            df = pd.DataFrame(track_info)
+                            st.dataframe(df, use_container_width=True)
+                        else:
+                            st.info("No tracks found")
             else:
                 st.info("No infrastructure found for selected states and filters.")
         else:
