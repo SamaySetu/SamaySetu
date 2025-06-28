@@ -2,3 +2,4 @@ requests
 streamlit
 folium
 pandas
+streamlit-folium
