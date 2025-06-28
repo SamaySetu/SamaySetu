@@ -2,57 +2,68 @@ import requests
 import json
 import time
 
-def get_railway_data():
-    query = """
-    [out:json][timeout:180];
-
-    area["name"="Tamil Nadu"]->.tn;
-    area["name"="Kerala"]->.kl;
-    area["name"="Karnataka"]->.ka;
-    area["name"="Andhra Pradesh"]->.ap;
-    area["name"="Telangana"]->.tg;
-    area["name"="Puducherry"]->.py;
-
-    (
-      way["railway"="rail"](area.tn);
-      way["railway"="rail"](area.kl);
-      way["railway"="rail"](area.ka);
-      way["railway"="rail"](area.ap);
-      way["railway"="rail"](area.tg);
-      way["railway"="rail"](area.py);
-
-      node["railway"="station"](area.tn);
-      node["railway"="station"](area.kl);
-      node["railway"="station"](area.ka);
-      node["railway"="station"](area.ap);
-      node["railway"="station"](area.tg);
-      node["railway"="station"](area.py);
-
-      way["railway"="station"](area.tn);
-      way["railway"="station"](area.kl);
-      way["railway"="station"](area.ka);
-      way["railway"="station"](area.ap);
-      way["railway"="station"](area.tg);
-      way["railway"="station"](area.py);
-    );
-
-    out body;
-    >;
-    out skel qt;
-    """
+def get_railway_data_by_state():
+    states = {
+        "Tamil Nadu": "tn",
+        "Kerala": "kl", 
+        "Karnataka": "ka",
+        "Andhra Pradesh": "ap",
+        "Telangana": "tg",
+        "Puducherry": "py"
+    }
     
-    url = "https://overpass-api.de/api/interpreter"
+    all_elements = []
     
-    try:
-        response = requests.post(url, data=query, timeout=200)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.Timeout:
-        print("Query timed out")
-        return None
-    except requests.exceptions.RequestException as e:
-        print(f"Request failed: {e}")
-        return None
+    for state_name, state_code in states.items():
+        print(f"Fetching data for {state_name}...")
+        
+        query = f"""
+        [out:json][timeout:60];
+        
+        area["name"="{state_name}"]->.{state_code};
+        
+        (
+          node["railway"]
+            ["railway"!~"subway|light_rail|tram"]
+            (area.{state_code});
+          way["railway"]
+            ["railway"!~"subway|light_rail|tram"]
+            (area.{state_code});
+          relation["railway"]
+            ["railway"!~"subway|light_rail|tram"]
+            (area.{state_code});
+        );
+        
+        out body;
+        >;
+        out skel qt;
+        """
+        
+        url = "https://overpass-api.de/api/interpreter"
+        
+        try:
+            response = requests.post(url, data=query, timeout=120)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Add state info to each element since we know which state we're querying
+            for elem in data.get('elements', []):
+                if 'tags' not in elem:
+                    elem['tags'] = {}
+                elem['tags']['state'] = state_name
+            
+            all_elements.extend(data.get('elements', []))
+            print(f"  Added {len(data.get('elements', []))} elements from {state_name}")
+            
+        except requests.exceptions.Timeout:
+            print(f"  Query timed out for {state_name}")
+        except requests.exceptions.RequestException as e:
+            print(f"  Request failed for {state_name}: {e}")
+        
+        # Small delay between requests
+        time.sleep(1)
+    
+    return {"elements": all_elements}
 
 def save_data(data, filename="railway_data.json"):
     import os
@@ -61,12 +72,12 @@ def save_data(data, filename="railway_data.json"):
         json.dump(data, f, indent=2)
 
 def main():
-    print("Fetching railway data...")
-    data = get_railway_data()
+    print("Fetching railway data by state...")
+    data = get_railway_data_by_state()
     
     if data:
         save_data(data)
-        print(f"Data saved with {len(data.get('elements', []))} elements")
+        print(f"Data saved with {len(data.get('elements', []))} total elements")
     else:
         print("Failed to fetch data")
 
