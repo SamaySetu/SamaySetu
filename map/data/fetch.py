@@ -23,15 +23,18 @@ def get_railway_data_by_state():
         area["name"="{state_name}"]->.{state_code};
         
         (
-          node["railway"]
-            ["railway"!~"subway|light_rail|tram"]
-            (area.{state_code});
-          way["railway"]
-            ["railway"!~"subway|light_rail|tram"]
-            (area.{state_code});
-          relation["railway"]
-            ["railway"!~"subway|light_rail|tram"]
-            (area.{state_code});
+          way["railway"="rail"](area.{state_code});
+          node["railway"="station"](area.{state_code});
+          way["railway"="station"](area.{state_code});
+          node["railway"="signal"](area.{state_code});
+          way["railway"="signal"](area.{state_code});
+          node["railway"="milestone"](area.{state_code});
+          way["railway"="milestone"](area.{state_code});
+          node["milestone"](area.{state_code});
+          node["railway:signal"](area.{state_code});
+          node["railway"="junction"](area.{state_code});
+          way["railway"="junction"](area.{state_code});
+          node["railway"~"yard|depot|halt|platform"](area.{state_code});
         );
         
         out body;
@@ -46,7 +49,7 @@ def get_railway_data_by_state():
             response.raise_for_status()
             data = response.json()
             
-            # Add state info to each element since we know which state we're querying
+            # Add state info to each element
             for elem in data.get('elements', []):
                 if 'tags' not in elem:
                     elem['tags'] = {}
