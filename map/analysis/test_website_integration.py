@@ -1,15 +1,22 @@
 import sys
 import os
 
-# Add the algorithms directory to the Python path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'algorithms'))
+# Add the parent directory to Python path to enable package imports
+parent_dir = os.path.dirname(os.path.dirname(__file__))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
 
-from station_importance import (
-    extract_station_data_from_website,
-    get_station_data_by_name,
-    calculate_station_importance,
-    rank_stations_by_importance
-)
+try:
+    from algorithms.station_importance import (
+        extract_station_data_from_website,
+        get_station_data_by_name,
+        calculate_station_importance,
+        rank_stations_by_importance
+    )
+except ImportError as e:
+    print(f"Error importing station_importance: {e}")
+    print(f"Make sure the algorithms directory exists at: {parent_dir}")
+    sys.exit(1)
 
 def test_website_data_extraction():
     """Test if the website data extraction works correctly."""

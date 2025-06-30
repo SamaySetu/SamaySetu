@@ -1,5 +1,7 @@
 import json
 import math
+import os
+import sys
 from datetime import datetime
 
 def find_tracks_near_station(station, tracks, max_distance=0.01):
@@ -78,10 +80,11 @@ def generate_track_aligned_signals(infrastructure):
     
     # Get all tracks for reference
     all_tracks = infrastructure['tracks']
+    all_stations = infrastructure['stations']
     
-    # 1. Generate signals for major stations
-    print(f"Processing {len(infrastructure['major_stations'])} major stations...")
-    for station in infrastructure['major_stations']:
+    # 1. Generate signals for high-importance stations (top 200)
+    print(f"Processing top 200 stations from {len(all_stations)} total stations...")
+    for station in all_stations[:200]:
         nearby_tracks = find_tracks_near_station(station, all_tracks, max_distance=0.008)
         
         if not nearby_tracks:
@@ -143,9 +146,9 @@ def generate_track_aligned_signals(infrastructure):
             
             track_count += 1
     
-    # 2. Generate signals for regular stations (increase from 100 to 500)
-    print(f"Processing {min(500, len(infrastructure['stations']))} regular stations...")
-    for station in infrastructure['stations'][:500]:  # Increased for more signals
+    # 2. Generate signals for remaining stations (next 300)
+    print(f"Processing next 300 stations from remaining {len(all_stations[200:])} stations...")
+    for station in all_stations[200:500]:  # Process stations 201-500
         nearby_tracks = find_tracks_near_station(station, all_tracks, max_distance=0.005)
         
         if not nearby_tracks:
@@ -376,8 +379,15 @@ if __name__ == "__main__":
         data = json.load(f)
     
     # Extract infrastructure
-    from fetch import extract_infrastructure
-    infrastructure = extract_infrastructure(data['elements'])
+    try:
+        parent_dir = os.path.dirname(os.path.dirname(__file__))
+        if parent_dir not in sys.path:
+            sys.path.insert(0, parent_dir)
+        from scripts.fetch import extract_infrastructure
+        infrastructure = extract_infrastructure(data['elements'])
+    except ImportError as e:
+        print(f"Error importing fetch module: {e}")
+        exit(1)
     
     # Generate new track-aligned signals
     new_signals = generate_track_aligned_signals(infrastructure)

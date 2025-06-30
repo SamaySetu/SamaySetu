@@ -99,10 +99,15 @@ def extract_infrastructure(elements):
 def generate_realistic_signals(infrastructure):
     """Generate realistic railway signals that would exist in real life"""
     # Import the track-aligned signal generation
-    algorithms_path = os.path.join(os.path.dirname(__file__), '..', 'algorithms')
-    if algorithms_path not in sys.path:
-        sys.path.insert(0, algorithms_path)
-    from track_aligned_signals import generate_track_aligned_signals
+    parent_dir = os.path.dirname(os.path.dirname(__file__))
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+    
+    try:
+        from algorithms.track_aligned_signals import generate_track_aligned_signals
+    except ImportError as e:
+        print(f"Error importing track_aligned_signals: {e}")
+        return []
     
     print("Generating track-aligned realistic railway signals...")
     synthetic_signals = generate_track_aligned_signals(infrastructure)
@@ -319,20 +324,28 @@ def main():
         # Calculate speed limits for track segments
         print("\nCalculating speed limits for track segments...")
         # Import speed limits module
-        algorithms_path = os.path.join(os.path.dirname(__file__), '..', 'algorithms')
-        if algorithms_path not in sys.path:
-            sys.path.insert(0, algorithms_path)
-        from speed_limits import add_speed_limits_to_tracks
+        parent_dir = os.path.dirname(os.path.dirname(__file__))
+        if parent_dir not in sys.path:
+            sys.path.insert(0, parent_dir)
         
-        print("Using Open-Elevation API (free, reliable)")
-        print("   Elevation functionality integrated in speed_limits module")
-        
-        infrastructure = add_speed_limits_to_tracks(infrastructure)
+        try:
+            from algorithms.speed_limits import add_speed_limits_to_tracks
+        except ImportError as e:
+            print(f"Warning: Could not import speed_limits module: {e}")
+            print("Skipping speed limit calculations...")
+        else:
+            print("Using Open-Elevation API (free, reliable)")
+            print("   Elevation functionality integrated in speed_limits module")
+            infrastructure = add_speed_limits_to_tracks(infrastructure)
         
         # Calculate station importance rankings
         print("\nCalculating station importance rankings...")
-        from station_importance import rank_stations_by_importance
-        infrastructure = rank_stations_by_importance(infrastructure)
+        try:
+            from algorithms.station_importance import rank_stations_by_importance
+            infrastructure = rank_stations_by_importance(infrastructure)
+        except ImportError as e:
+            print(f"Warning: Could not import station_importance module: {e}")
+            print("Skipping station importance calculations...")
         
         # Integrate synthetic signals into main data
         data['elements'].extend(synthetic_signals)
