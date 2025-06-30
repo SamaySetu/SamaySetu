@@ -26,7 +26,9 @@ def extract_infrastructure(elements):
     
     for elem in elements:
         if elem['type'] == 'node' and 'lat' in elem and 'lon' in elem:
-            key = (elem['lat'], elem['lon'])
+            # Use element ID instead of coordinates to avoid removing synthetic signals
+            # that may be placed close to each other
+            key = elem.get('id', f"{elem['lat']},{elem['lon']}")
             if key in seen:
                 continue
             seen.add(key)
@@ -139,40 +141,32 @@ def create_enhanced_map(infrastructure, selected_states):
         else:
             track_categories['other']['tracks'].append(track)
     
-    # Render tracks by category with performance-optimized limits
-    limits = {'main': 300, 'branch': 200, 'service': 100, 'industrial': 50, 'narrow_gauge': 50, 'other': 50}
+    # Render tracks by category with improved limits and connectivity focus
+    limits = {'main': 800, 'branch': 600, 'service': 200, 'industrial': 150, 'narrow_gauge': 150, 'other': 150}
     
     for category, data in track_categories.items():
         tracks = data['tracks']
         
-        # Simple length-based selection for performance
-        # Take the first N tracks (they're already in a reasonable order from OSM)
+        # Instead of just sorting by length, try to maintain better connectivity
+        # Sort by a combination of length and coordinate density
+        tracks.sort(key=lambda x: (len(x.get('coords', [])), x.get('length', 0)), reverse=True)
+        
+        # Show more tracks for better connectivity, especially for main and branch lines
         selected_tracks = tracks[:limits[category]]
         
         for track in selected_tracks:
-            # Add a subtle glow effect by drawing a thicker, more transparent line underneath
-            folium.PolyLine(
-                locations=track['coords'],
-                color=data['color'],
-                weight=data['weight'] + 3,
-                opacity=data['opacity'] * 0.2,
-                interactive=False  # This line won't be interactive to avoid selection box
-            ).add_to(m)
-            
-            # Add the main track line on top
             folium.PolyLine(
                 locations=track['coords'],
                 color=data['color'],
                 weight=data['weight'],
                 opacity=data['opacity'],
-                tooltip=f"{category.title()} Track" + (f" (Electrified)" if track.get('electrified') else ""),
-                # Add custom options to reduce selection artifacts
-                options={'bubblingMouseEvents': False}
+                popup=f"🛤️ {category.title()} Track" + (f" (Electrified)" if track.get('electrified') else ""),
+                tooltip=f"{category.title()} Track"
             ).add_to(m)
     
-    # Add milestones (smallest) - reduced for performance
+    # Add milestones (smallest)
     filtered_milestones = filter_by_state(infrastructure['milestones'])
-    for milestone in filtered_milestones[:50]:  # Reduced from 100
+    for milestone in filtered_milestones[:100]:
         folium.CircleMarker(
             location=[milestone['lat'], milestone['lon']],
             radius=2,
@@ -184,9 +178,9 @@ def create_enhanced_map(infrastructure, selected_states):
             weight=1
         ).add_to(m)
     
-    # Add signals - reduced for performance
+    # Add signals
     filtered_signals = filter_by_state(infrastructure['signals'])
-    for signal in filtered_signals[:150]:  # Reduced from 300
+    for signal in filtered_signals[:300]:
         folium.CircleMarker(
             location=[signal['lat'], signal['lon']],
             radius=3,
@@ -198,9 +192,9 @@ def create_enhanced_map(infrastructure, selected_states):
             weight=1
         ).add_to(m)
     
-    # Add regular stations - reduced for performance
+    # Add regular stations
     filtered_stations = filter_by_state(infrastructure['stations'])
-    for station in filtered_stations[:200]:  # Reduced from 400
+    for station in filtered_stations[:400]:
         folium.CircleMarker(
             location=[station['lat'], station['lon']],
             radius=4,
@@ -354,8 +348,8 @@ def main():
         show_tracks = st.sidebar.checkbox("Railway Tracks", value=True)
         show_stations = st.sidebar.checkbox("Regular Stations", value=True)
         show_major_stations = st.sidebar.checkbox("Major Stations/Junctions", value=True)
-        show_signals = st.sidebar.checkbox("Signals", value=False)  # Default off for performance
-        show_milestones = st.sidebar.checkbox("Milestones", value=False)  # Default off for performance
+        show_signals = st.sidebar.checkbox("Signals", value=True)
+        show_milestones = st.sidebar.checkbox("Milestones", value=True)
         
         # Stats
         if selected_states:
@@ -415,18 +409,19 @@ def main():
                     st.sidebar.text(f"Longest track: {max(track_lengths)} points")
                     st.sidebar.text(f"Shortest track: {min(track_lengths)} points")
                 
-                # Connectivity analysis (lightweight version)
-                if st.sidebar.checkbox("Show Basic Track Info", value=False):
-                    connectivity = analyze_track_connectivity(filtered_infrastructure['tracks'][:100])  # Analyze only first 100 tracks
-                    st.sidebar.markdown("#### Basic Track Info (Sample)")
-                    st.sidebar.text(f"Sample size: 100 tracks")
+                # Connectivity analysis
+                if st.sidebar.checkbox("Show Connectivity Analysis", value=False):
+                    connectivity = analyze_track_connectivity(filtered_infrastructure['tracks'])
+                    st.sidebar.markdown("#### Connectivity Analysis")
                     st.sidebar.text(f"Connection points: {connectivity['connection_points']}")
                     st.sidebar.text(f"Isolated endpoints: {connectivity['isolated_endpoints']}")
+                    st.sidebar.text("Length distribution:")
+                    for length, count in sorted(connectivity['length_distribution'].items()):
+                        st.sidebar.text(f"  {length}-{length+9} points: {count} tracks")
             
             # Create and display map
             if any(len(filtered_infrastructure[key]) > 0 for key in filtered_infrastructure.keys()):
                 st.subheader("🗺️ Railway Infrastructure Map")
-                st.info("💡 **Performance Note**: Map shows a subset of tracks for faster loading. Enable signals/milestones in sidebar for more detail.")
                 
                 # Apply infrastructure type filters
                 display_infrastructure = {
@@ -437,16 +432,14 @@ def main():
                     'tracks': filtered_infrastructure['tracks'] if show_tracks else []
                 }
                 
-                # Show loading message
-                with st.spinner('Loading map... This may take a moment.'):
-                    # Create enhanced map with all infrastructure
-                    m = create_enhanced_map(display_infrastructure, selected_states)
-                    
-                    # Add legend
-                    m = add_legend(m)
+                # Create enhanced map with all infrastructure
+                m = create_enhanced_map(display_infrastructure, selected_states)
                 
-                # Display the map with optimized size for faster loading
-                map_data = st_folium(m, width=1200, height=500)
+                # Add legend
+                m = add_legend(m)
+                
+                # Display the map
+                map_data = st_folium(m, width=1200, height=700)
                 
                 # Map usage guide
                 st.caption("💡 Click markers for details • Different colors represent different infrastructure types • Use sidebar filters to toggle visibility")
