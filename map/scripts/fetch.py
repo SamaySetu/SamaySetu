@@ -5,13 +5,6 @@ import sys
 import os
 from datetime import datetime
 
-# Add parent directories to path for imports
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'algorithms'))
-
-# Import analysis modules
-from speed_limits import add_speed_limits_to_tracks
-from station_importance import rank_stations_by_importance
-
 def extract_infrastructure(elements):
     """Extract infrastructure from OSM elements for signal synthesis"""
     infrastructure = {
@@ -108,7 +101,9 @@ def extract_infrastructure(elements):
 def generate_realistic_signals(infrastructure):
     """Generate realistic railway signals that would exist in real life"""
     # Import the track-aligned signal generation
-    sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'algorithms'))
+    algorithms_path = os.path.join(os.path.dirname(__file__), '..', 'algorithms')
+    if algorithms_path not in sys.path:
+        sys.path.insert(0, algorithms_path)
     from track_aligned_signals import generate_track_aligned_signals
     
     print("Generating track-aligned realistic railway signals...")
@@ -212,10 +207,16 @@ def main():
         
         # Calculate speed limits for track segments
         print("\nCalculating speed limits for track segments...")
+        # Import speed limits module
+        algorithms_path = os.path.join(os.path.dirname(__file__), '..', 'algorithms')
+        if algorithms_path not in sys.path:
+            sys.path.insert(0, algorithms_path)
+        from speed_limits import add_speed_limits_to_tracks
         infrastructure = add_speed_limits_to_tracks(infrastructure)
         
         # Calculate station importance rankings
         print("\nCalculating station importance rankings...")
+        from station_importance import rank_stations_by_importance
         infrastructure = rank_stations_by_importance(infrastructure)
         
         # Integrate synthetic signals into main data
