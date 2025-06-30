@@ -11,6 +11,31 @@ def load_data():
     with open(data_path, 'r') as f:
         return json.load(f)
 
+@st.cache_data
+def load_split_data():
+    """Load data from split files for more efficient access"""
+    data_dir = os.path.join(os.path.dirname(__file__), 'data')
+    
+    files = {
+        'stations': 'stations.json',
+        'tracks': 'tracks.json', 
+        'signals': 'signals.json',
+        'other': 'other_infrastructure.json',
+        'analysis': 'analysis.json'
+    }
+    
+    data = {}
+    for key, filename in files.items():
+        filepath = os.path.join(data_dir, filename)
+        try:
+            with open(filepath, 'r') as f:
+                data[key] = json.load(f)
+        except FileNotFoundError:
+            # Fall back to combined file if split files don't exist
+            return None
+    
+    return data
+
 def extract_infrastructure(elements):
     # Extract all railway infrastructure
     infrastructure = {

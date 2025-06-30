@@ -12,7 +12,8 @@ def extract_infrastructure(elements):
         'major_stations': [],
         'signals': [],
         'milestones': [],
-        'tracks': []
+        'tracks': [],
+        'other_infrastructure': []  # yards, depots, halts, platforms
     }
     
     seen = set()
@@ -33,7 +34,8 @@ def extract_infrastructure(elements):
                 'name': name,
                 'lat': elem['lat'],
                 'lon': elem['lon'],
-                'state': state
+                'state': state,
+                'railway_type': railway_type
             }
             
             # Categorize stations and junctions
@@ -49,6 +51,9 @@ def extract_infrastructure(elements):
                 infrastructure['signals'].append(base_data)
             elif railway_type == 'milestone' or 'milestone' in elem.get('tags', {}):
                 infrastructure['milestones'].append(base_data)
+            elif railway_type in ['yard', 'depot', 'halt', 'platform']:
+                # Other railway infrastructure
+                infrastructure['other_infrastructure'].append({**base_data, 'type': railway_type})
         
         # Extract tracks
         elif elem['type'] == 'way' and elem.get('tags', {}).get('railway') == 'rail':
@@ -186,6 +191,123 @@ def save_data(data, filename="railway_data.json"):
     with open(filepath, 'w') as f:
         json.dump(data, f, indent=2)
 
+def save_split_data(infrastructure, synthetic_signals, metadata):
+    """Save data split into separate files by infrastructure type"""
+    import os
+    data_dir = os.path.join(os.path.dirname(__file__), '..', 'data')
+    os.makedirs(data_dir, exist_ok=True)
+    
+    # Save stations (combine regular and major stations)
+    all_stations = infrastructure.get('stations', []) + infrastructure.get('major_stations', [])
+    stations_data = {
+        'stations': all_stations,
+        'metadata': {
+            **metadata,
+            'file_type': 'stations',
+            'total_stations': len(all_stations),
+            'regular_stations': len(infrastructure.get('stations', [])),
+            'major_stations': len(infrastructure.get('major_stations', []))
+        }
+    }
+    
+    # Save tracks with speed limit data
+    tracks_data = {
+        'tracks': infrastructure.get('tracks', []),
+        'metadata': {
+            **metadata,
+            'file_type': 'tracks',
+            'total_tracks': len(infrastructure.get('tracks', [])),
+            'speed_statistics': infrastructure.get('speed_statistics', {})
+        }
+    }
+    
+    # Save signals (existing + synthetic)
+    all_signals = infrastructure.get('signals', []) + synthetic_signals
+    signals_data = {
+        'signals': all_signals,
+        'metadata': {
+            **metadata,
+            'file_type': 'signals',
+            'total_signals': len(all_signals),
+            'osm_signals': len(infrastructure.get('signals', [])),
+            'synthetic_signals': len(synthetic_signals)
+        }
+    }
+    
+    # Save other infrastructure (milestones, yards, depots, halts, platforms)
+    other_data = {
+        'milestones': infrastructure.get('milestones', []),
+        'other_infrastructure': infrastructure.get('other_infrastructure', []),
+        'metadata': {
+            **metadata,
+            'file_type': 'other_infrastructure',
+            'total_milestones': len(infrastructure.get('milestones', [])),
+            'total_other': len(infrastructure.get('other_infrastructure', []))
+        }
+    }
+    
+    # Save analysis data
+    analysis_data = {
+        'station_rankings': infrastructure.get('station_rankings', {}),
+        'speed_statistics': infrastructure.get('speed_statistics', {}),
+        'metadata': {
+            **metadata,
+            'file_type': 'analysis',
+            'analysis_complete': True
+        }
+    }
+    
+    # Save each file
+    files_to_save = [
+        ('stations.json', stations_data),
+        ('tracks.json', tracks_data),
+        ('signals.json', signals_data),
+        ('other_infrastructure.json', other_data),
+        ('analysis.json', analysis_data)
+    ]
+    
+    for filename, data in files_to_save:
+        filepath = os.path.join(data_dir, filename)
+        with open(filepath, 'w') as f:
+            json.dump(data, f, indent=2)
+        print(f"  Saved {filename} ({len(data.get(data['metadata']['file_type'].split('_')[0], data.get('stations', data.get('tracks', data.get('signals', data.get('milestones', []))))))} items)")
+    
+    # Also save the combined file for backward compatibility
+    combined_data = {
+        'elements': (infrastructure.get('signals', []) + 
+                    infrastructure.get('stations', []) + 
+                    infrastructure.get('major_stations', []) + 
+                    infrastructure.get('milestones', []) + 
+                    synthetic_signals),
+        'metadata': metadata,
+        'infrastructure_analysis': {
+            'speed_statistics': infrastructure.get('speed_statistics', {}),
+            'station_rankings': infrastructure.get('station_rankings', {}),
+            'analysis_complete': True
+        }
+    }
+    
+    # Add tracks as simplified elements for backward compatibility
+    for track in infrastructure.get('tracks', []):
+        # Convert track to elements format (simplified)
+        track_element = {
+            'type': 'way',
+            'tags': {
+                'railway': 'rail',
+                'state': track.get('state', 'Unknown'),
+                'track_type': track.get('type', 'other')
+            },
+            'coords': track.get('coords', [])
+        }
+        if 'speed_limit_kmh' in track:
+            track_element['tags']['speed_limit'] = str(track['speed_limit_kmh'])
+        combined_data['elements'].append(track_element)
+    
+    filepath = os.path.join(data_dir, 'railway_data.json')
+    with open(filepath, 'w') as f:
+        json.dump(combined_data, f, indent=2)
+    print(f"  Saved railway_data.json (combined file with {len(combined_data['elements'])} elements)")
+
 def main():
     print("Fetching railway data by state...")
     data = get_railway_data_by_state()
@@ -202,6 +324,8 @@ def main():
         print(f"  - Major stations: {len(infrastructure['major_stations'])}")
         print(f"  - Existing signals: {len(infrastructure['signals'])}")
         print(f"  - Track segments: {len(infrastructure['tracks'])}")
+        print(f"  - Milestones: {len(infrastructure['milestones'])}")
+        print(f"  - Other infrastructure (yards, depots, halts): {len(infrastructure['other_infrastructure'])}")
         
         synthetic_signals = generate_realistic_signals(infrastructure)
         
@@ -223,7 +347,7 @@ def main():
         data['elements'].extend(synthetic_signals)
         
         # Add enhanced metadata
-        data['metadata'] = {
+        metadata = {
             'osm_elements': len(data['elements']) - len(synthetic_signals),
             'synthetic_signals': len(synthetic_signals),
             'total_elements': len(data['elements']),
@@ -234,20 +358,23 @@ def main():
             'fetch_version': '3.0'
         }
         
-        # Add infrastructure analysis to data
-        data['infrastructure_analysis'] = {
-            'speed_statistics': infrastructure.get('speed_statistics', {}),
-            'station_rankings': infrastructure.get('station_rankings', {}),
-            'analysis_complete': True
-        }
+        # Save data split into separate files
+        print(f"\nSaving data split by infrastructure type...")
+        save_split_data(infrastructure, synthetic_signals, metadata)
         
-        save_data(data)
-        print(f"\nData saved with {len(data['elements'])} total elements")
-        print(f"  - OSM elements: {data['metadata']['osm_elements']}")
-        print(f"  - Realistic synthetic signals: {data['metadata']['synthetic_signals']}")
+        print(f"\nData processing complete!")
+        print(f"  - OSM elements: {metadata['osm_elements']}")
+        print(f"  - Realistic synthetic signals: {metadata['synthetic_signals']}")
         print(f"  - Track segments with speed limits: {len(infrastructure['tracks'])}")
         print(f"  - Stations with importance rankings: {infrastructure['station_rankings']['total_stations']}")
         print("Complete railway network analysis ready!")
+        print("\nGenerated files:")
+        print("  - stations.json (station data with importance rankings)")
+        print("  - tracks.json (track data with speed limits)")
+        print("  - signals.json (OSM + synthetic signals)")
+        print("  - other_infrastructure.json (milestones, etc.)")
+        print("  - analysis.json (rankings and statistics)")
+        print("  - railway_data.json (combined file for backward compatibility)")
     else:
         print("Failed to fetch data")
 
