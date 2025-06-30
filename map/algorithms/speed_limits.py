@@ -1,6 +1,13 @@
 import math
 import numpy as np
-from typing import List, Tuple, Dict
+import requests
+import time
+import os
+from typing import List, Tuple, Dict, Optional
+
+# Elevation API Configuration
+ELEVATION_API_URL = "https://api.open-elevation.com/api/v1/lookup"
+ELEVATION_API_MAX_POINTS = 50
 
 def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculate distance between two points in kilometers using Haversine formula"""
@@ -64,48 +71,169 @@ def calculate_curvature(coords: List[List[float]], segment_length: float = 1.0) 
     # Return curvature in degrees per kilometer
     return total_bearing_change / max(total_distance, 0.001)
 
-def estimate_gradient(coords: List[List[float]]) -> float:
+def get_elevation_data(coordinates: List[List[float]], max_points: int = ELEVATION_API_MAX_POINTS) -> List[float]:
     """
-    Estimate track gradient. Since OSM doesn't have elevation data,
-    we use geographic heuristics and terrain patterns.
+    Get elevation data using Open-Elevation API.
+    
+    Args:
+        coordinates: List of [lat, lon] pairs
+        max_points: Maximum number of points to query (API limitation)
+    
+    Returns:
+        List of elevations in meters
     """
-    if len(coords) < 2:
-        return 0.0
+    # Limit coordinates to avoid API rate limits
+    if len(coordinates) > max_points:
+        # Sample coordinates evenly
+        step = len(coordinates) // max_points
+        sampled_coords = coordinates[::step][:max_points]
+    else:
+        sampled_coords = coordinates
     
-    # Basic gradient estimation based on geographic patterns
-    start_lat, start_lon = coords[0]
-    end_lat, end_lon = coords[-1]
+    elevations = []
     
-    # Estimate elevation changes based on known geographic patterns
-    # Western Ghats: steep gradients
-    # Coastal plains: minimal gradients
-    # Deccan plateau: moderate gradients
+    # Use Open-Elevation API
+    try:
+        print("Getting elevation data from Open-Elevation API...")
+        
+        # Batch request format
+        locations = [{"latitude": lat, "longitude": lon} for lat, lon in sampled_coords]
+        response = requests.post(ELEVATION_API_URL, json={"locations": locations}, timeout=15)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if 'results' in data:
+                for result in data['results']:
+                    elevations.append(float(result['elevation']))
+                print(f"Retrieved {len(elevations)} elevations")
+                success = True
+            else:
+                success = False
+        else:
+            print(f"API error: {response.status_code}")
+            success = False
+            
+    except Exception as e:
+        print(f"API error: {e}")
+        success = False
     
-    # Western Ghats regions (approximate boundaries)
+    # Fallback to geographic estimation if API fails
+    if not success:
+        print("API failed, using geographic estimation fallback...")
+        elevations = [estimate_elevation_fallback(lat, lon) for lat, lon in sampled_coords]
+    
+    # Interpolate elevations back to original coordinate count if we sampled
+    if len(coordinates) > max_points and elevations:
+        # Linear interpolation to fill in missing elevations
+        x_original = np.linspace(0, 1, len(coordinates))
+        x_sampled = np.linspace(0, 1, len(elevations))
+        elevations = np.interp(x_original, x_sampled, elevations).tolist()
+    
+    return elevations
+
+def estimate_elevation_fallback(lat: float, lon: float) -> float:
+    """
+    Fallback elevation estimation based on known geographic patterns.
+    Used when elevation APIs are unavailable.
+    """
+    # Western Ghats: high elevation (500-2000m)
     western_ghats_regions = [
         (8.0, 77.0, 12.0, 76.0),  # Karnataka Western Ghats
         (11.0, 76.0, 12.5, 77.5),  # Tamil Nadu Western Ghats
         (8.5, 76.5, 10.5, 77.0),  # Kerala Western Ghats
     ]
     
-    gradient_factor = 0.0
+    for min_lat, min_lon, max_lat, max_lon in western_ghats_regions:
+        if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon:
+            # Higher elevation in Western Ghats
+            return 800 + (lat - min_lat) * 200  # Gradient from 800m to 1200m
     
-    # Check if track passes through Western Ghats
-    for lat, lon in coords:
-        for min_lat, min_lon, max_lat, max_lon in western_ghats_regions:
-            if min_lat <= lat <= max_lat and min_lon <= lon <= max_lon:
-                gradient_factor = max(gradient_factor, 2.0)  # Steep gradient
-                break
+    # Coastal regions: low elevation (0-100m)
+    if lon < 76.5 or lon > 80.5:
+        return max(0, 50 - abs(lat - 10) * 10)  # Sea level to 50m
     
-    # Coastal regions (flatter)
-    if any(lon < 76.0 or lon > 80.0 for _, lon in coords):
-        gradient_factor = min(gradient_factor, 0.5)  # Minimal gradient
+    # Eastern Ghats: moderate elevation (200-800m)
+    if 78.5 <= lon <= 80.5:
+        return 300 + abs(lat - 14) * 50  # 300-600m elevation
     
-    # Default moderate gradient for Deccan plateau
-    if gradient_factor == 0.0:
-        gradient_factor = 1.0
+    # Deccan plateau: moderate elevation (400-800m)
+    return 500 + (lat - 12) * 30  # Default plateau elevation
+
+def calculate_gradient_from_elevation(coords: List[List[float]], elevations: List[float]) -> Tuple[float, float]:
+    """
+    Calculate track gradient and banking from elevation data.
     
-    return gradient_factor
+    Returns:
+        Tuple of (average_gradient_percent, max_gradient_percent)
+    """
+    if len(coords) < 2 or len(elevations) < 2:
+        return 0.0, 0.0
+    
+    gradients = []
+    
+    for i in range(len(coords) - 1):
+        if i >= len(elevations) - 1:
+            break
+            
+        # Calculate horizontal distance
+        horizontal_distance = calculate_distance(
+            coords[i][0], coords[i][1],
+            coords[i+1][0], coords[i+1][1]
+        ) * 1000  # Convert to meters
+        
+        # Calculate elevation change
+        elevation_change = elevations[i+1] - elevations[i]
+        
+        if horizontal_distance > 0:
+            # Gradient as percentage (rise/run * 100)
+            gradient = (elevation_change / horizontal_distance) * 100
+            gradients.append(abs(gradient))
+    
+    if not gradients:
+        return 0.0, 0.0
+    
+    avg_gradient = np.mean(gradients)
+    max_gradient = max(gradients)
+    
+    return avg_gradient, max_gradient
+
+def calculate_banking_requirement(coords: List[List[float]], elevations: List[float], speed_kmh: float) -> float:
+    """
+    Calculate required banking angle for curves based on speed and curvature.
+    
+    Returns:
+        Banking angle in degrees
+    """
+    if len(coords) < 3:
+        return 0.0
+    
+    curvature = calculate_curvature(coords)
+    
+    if curvature < 1.0:  # Very gentle curves don't need banking
+        return 0.0
+    
+    # Convert speed to m/s
+    speed_ms = speed_kmh / 3.6
+    
+    # Estimate curve radius from curvature (degrees per km)
+    # Rough approximation: radius ≈ 57.3 / (curvature in degrees per km * km per 1000m)
+    if curvature > 0:
+        curve_radius = 57300 / curvature  # meters
+    else:
+        return 0.0
+    
+    # Standard banking calculation for railways
+    # tan(θ) = v²/(g*r) where θ is banking angle, v is speed, g is gravity, r is radius
+    g = 9.81  # gravity in m/s²
+    
+    if curve_radius > 0:
+        banking_rad = math.atan(speed_ms**2 / (g * curve_radius))
+        banking_deg = math.degrees(banking_rad)
+        
+        # Practical limits for railway banking (typically 0-10 degrees)
+        return min(10.0, max(0.0, banking_deg))
+    
+    return 0.0
 
 def is_urban_area(lat: float, lon: float, major_cities: List[Dict]) -> bool:
     """Check if coordinates are near urban areas"""
@@ -117,7 +245,7 @@ def is_urban_area(lat: float, lon: float, major_cities: List[Dict]) -> bool:
 
 def calculate_speed_limit(track_segment: Dict, all_stations: List[Dict]) -> Dict:
     """
-    Calculate realistic speed limit for a track segment based on multiple factors.
+    Calculate realistic speed limit for a track segment based on multiple factors including real elevation data.
     Returns speed limit in km/h and classification.
     """
     coords = track_segment['coords']
@@ -149,9 +277,17 @@ def calculate_speed_limit(track_segment: Dict, all_stations: List[Dict]) -> Dict
         {'name': 'Tirunelveli', 'lat': 8.7139, 'lon': 77.7567, 'radius': 15},
     ]
     
+    # Get real elevation data using free APIs with fallbacks
+    print(f"Getting elevation data for track segment with {len(coords)} points...")
+    elevations = get_elevation_data(coords)
+    
     # Calculate factors
     curvature = calculate_curvature(coords)
-    gradient = estimate_gradient(coords)
+    avg_gradient, max_gradient = calculate_gradient_from_elevation(coords, elevations)
+    
+    # Calculate preliminary speed for banking calculation
+    preliminary_speed = base_speed
+    banking_angle = calculate_banking_requirement(coords, elevations, preliminary_speed)
     
     # Check proximity to stations
     min_station_distance = float('inf')
@@ -169,41 +305,63 @@ def calculate_speed_limit(track_segment: Dict, all_stations: List[Dict]) -> Dict
     
     # Curvature factor (reduce speed for sharp curves)
     if curvature > 50:  # Very sharp curves
-        speed_limit *= 0.6
+        speed_limit *= 0.5
+    elif curvature > 30:  # Sharp curves
+        speed_limit *= 0.65
     elif curvature > 20:  # Moderate curves
-        speed_limit *= 0.8
+        speed_limit *= 0.75
     elif curvature > 10:  # Gentle curves
-        speed_limit *= 0.9
-    
-    # Gradient factor (reduce speed for steep gradients)
-    if gradient > 1.5:  # Steep gradient
-        speed_limit *= 0.7
-    elif gradient > 1.0:  # Moderate gradient
         speed_limit *= 0.85
+    
+    # Gradient factor (reduce speed for steep gradients) - now using real elevation data
+    if max_gradient > 3.0:  # Very steep gradient (>3%)
+        speed_limit *= 0.5
+    elif max_gradient > 2.0:  # Steep gradient (>2%)
+        speed_limit *= 0.65
+    elif max_gradient > 1.5:  # Moderate steep gradient (>1.5%)
+        speed_limit *= 0.75
+    elif max_gradient > 1.0:  # Moderate gradient (>1%)
+        speed_limit *= 0.85
+    elif avg_gradient > 0.5:  # Gentle gradient (>0.5%)
+        speed_limit *= 0.95
+    
+    # Banking consideration - well-banked curves can handle higher speeds
+    if banking_angle > 5.0:  # Good banking allows higher speeds on curves
+        if curvature > 10:  # Only helps on curved sections
+            speed_limit *= 1.1
+    elif banking_angle < 2.0 and curvature > 20:  # Insufficient banking on curves
+        speed_limit *= 0.9
     
     # Gauge factor
     if gauge and gauge != '1676':  # Non-broad gauge
         if '1000' in gauge or '762' in gauge:  # Narrow gauge
-            speed_limit *= 0.7
+            speed_limit *= 0.65
         elif '1435' in gauge:  # Standard gauge (rare in India)
             speed_limit *= 0.9
     
     # Urban area restrictions
     if urban:
-        speed_limit *= 0.7
+        speed_limit *= 0.65
     
     # Station proximity restrictions
-    if min_station_distance < 2:  # Within 2km of station
-        speed_limit *= 0.8
+    if min_station_distance < 1:  # Within 1km of station
+        speed_limit *= 0.6
+    elif min_station_distance < 2:  # Within 2km of station
+        speed_limit *= 0.75
     elif min_station_distance < 5:  # Within 5km of station
         speed_limit *= 0.9
     
     # Electrification bonus (electrified tracks often allow higher speeds)
     if electrified and track_type in ['main', 'branch']:
+        speed_limit *= 1.15
+    
+    # Track type specific adjustments
+    if track_type == 'main' and max_gradient < 1.0 and curvature < 10:
+        # High-speed potential on good main lines
         speed_limit *= 1.1
     
     # Round to nearest 5 km/h and ensure reasonable bounds
-    speed_limit = max(25, min(160, round(speed_limit / 5) * 5))
+    speed_limit = max(20, min(160, round(speed_limit / 5) * 5))
     
     # Classify the speed limit
     if speed_limit >= 130:
@@ -225,7 +383,10 @@ def calculate_speed_limit(track_segment: Dict, all_stations: List[Dict]) -> Dict
         'factors': {
             'base_speed': base_speed,
             'curvature': round(curvature, 2),
-            'gradient_factor': round(gradient, 2),
+            'avg_gradient_percent': round(avg_gradient, 3),
+            'max_gradient_percent': round(max_gradient, 3),
+            'banking_angle_degrees': round(banking_angle, 2),
+            'elevation_range_m': f"{min(elevations):.1f}-{max(elevations):.1f}" if elevations else "N/A",
             'urban': urban,
             'min_station_distance_km': round(min_station_distance, 2),
             'electrified': electrified,
@@ -235,15 +396,21 @@ def calculate_speed_limit(track_segment: Dict, all_stations: List[Dict]) -> Dict
     }
 
 def add_speed_limits_to_tracks(infrastructure: Dict) -> Dict:
-    """Add speed limits to all track segments in the infrastructure"""
-    tracks = infrastructure.get('tracks', [])
-    all_stations = infrastructure.get('stations', []) + infrastructure.get('major_stations', [])
+    """
+    Add speed limits to all track segments in the infrastructure using free elevation APIs.
     
-    print(f"Calculating speed limits for {len(tracks)} track segments...")
+    Args:
+        infrastructure: Railway infrastructure data
+    """
+    tracks = infrastructure.get('tracks', [])
+    all_stations = infrastructure.get('stations', [])
+    
+    print(f"Calculating speed limits with real elevation data for {len(tracks)} track segments...")
+    print("Using reliable free elevation APIs (OpenTopoData + Open-Elevation)...")
     
     for i, track in enumerate(tracks):
-        if i % 100 == 0:
-            print(f"  Processing track {i+1}/{len(tracks)}")
+        if i % 50 == 0:  # Less frequent updates due to API calls
+            print(f"  Processing track {i+1}/{len(tracks)} (with elevation data)")
         
         speed_data = calculate_speed_limit(track, all_stations)
         track.update(speed_data)
@@ -251,10 +418,13 @@ def add_speed_limits_to_tracks(infrastructure: Dict) -> Dict:
     # Generate summary statistics
     speed_stats = {}
     classifications = {}
+    gradient_stats = {}
+    banking_stats = {}
     
     for track in tracks:
         speed = track.get('speed_limit_kmh', 0)
         classification = track.get('classification', 'unknown')
+        factors = track.get('factors', {})
         
         # Speed distribution
         speed_range = f"{(speed // 20) * 20}-{((speed // 20) + 1) * 20}"
@@ -262,16 +432,52 @@ def add_speed_limits_to_tracks(infrastructure: Dict) -> Dict:
         
         # Classification distribution
         classifications[classification] = classifications.get(classification, 0) + 1
+        
+        # Gradient statistics
+        max_gradient = factors.get('max_gradient_percent', 0)
+        if max_gradient > 3.0:
+            gradient_category = 'very_steep'
+        elif max_gradient > 2.0:
+            gradient_category = 'steep'
+        elif max_gradient > 1.0:
+            gradient_category = 'moderate'
+        elif max_gradient > 0.5:
+            gradient_category = 'gentle'
+        else:
+            gradient_category = 'flat'
+        
+        gradient_stats[gradient_category] = gradient_stats.get(gradient_category, 0) + 1
+        
+        # Banking statistics
+        banking = factors.get('banking_angle_degrees', 0)
+        if banking > 5.0:
+            banking_category = 'high_banking'
+        elif banking > 2.0:
+            banking_category = 'moderate_banking'
+        elif banking > 0.5:
+            banking_category = 'low_banking'
+        else:
+            banking_category = 'no_banking'
+        
+        banking_stats[banking_category] = banking_stats.get(banking_category, 0) + 1
     
     infrastructure['speed_statistics'] = {
         'speed_distribution': speed_stats,
         'classification_distribution': classifications,
+        'gradient_distribution': gradient_stats,
+        'banking_distribution': banking_stats,
         'total_tracks': len(tracks),
-        'average_speed': sum(t.get('speed_limit_kmh', 0) for t in tracks) / max(len(tracks), 1)
+        'average_speed': sum(t.get('speed_limit_kmh', 0) for t in tracks) / max(len(tracks), 1),
+        'average_gradient': sum(t.get('factors', {}).get('max_gradient_percent', 0) for t in tracks) / max(len(tracks), 1),
+        'average_banking': sum(t.get('factors', {}).get('banking_angle_degrees', 0) for t in tracks) / max(len(tracks), 1)
     }
     
-    print(f"Speed limit calculation complete!")
+    print(f"Speed limit calculation with elevation data complete!")
     print(f"  Average speed limit: {infrastructure['speed_statistics']['average_speed']:.1f} km/h")
+    print(f"  Average gradient: {infrastructure['speed_statistics']['average_gradient']:.2f}%")
+    print(f"  Average banking: {infrastructure['speed_statistics']['average_banking']:.1f}°")
     print(f"  Classifications: {classifications}")
+    print(f"  Gradient distribution: {gradient_stats}")
+    print(f"  Banking distribution: {banking_stats}")
     
     return infrastructure

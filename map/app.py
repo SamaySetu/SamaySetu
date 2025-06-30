@@ -11,36 +11,12 @@ def load_data():
     with open(data_path, 'r') as f:
         return json.load(f)
 
-@st.cache_data
-def load_split_data():
-    """Load data from split files for more efficient access"""
-    data_dir = os.path.join(os.path.dirname(__file__), 'data')
-    
-    files = {
-        'stations': 'stations.json',
-        'tracks': 'tracks.json', 
-        'signals': 'signals.json',
-        'other': 'other_infrastructure.json',
-        'analysis': 'analysis.json'
-    }
-    
-    data = {}
-    for key, filename in files.items():
-        filepath = os.path.join(data_dir, filename)
-        try:
-            with open(filepath, 'r') as f:
-                data[key] = json.load(f)
-        except FileNotFoundError:
-            # Fall back to combined file if split files don't exist
-            return None
-    
-    return data
+
 
 def extract_infrastructure(elements):
     # Extract all railway infrastructure
     infrastructure = {
-        'stations': [],
-        'major_stations': [],  # Combined major stations and junctions
+        'stations': [],  # All stations (will be ranked by importance algorithm)
         'signals': [],
         'milestones': [],
         'tracks': []
@@ -69,16 +45,9 @@ def extract_infrastructure(elements):
                 'state': state
             }
             
-            # Categorize by importance and type - combine major stations and junctions
+            # Categorize by type - all stations are treated equally, importance is determined by ranking algorithm
             if railway_type == 'station' or railway_type == 'junction':
-                # Check if it's a major station/central/junction by looking for keywords in name
-                major_keywords = ['jn', 'junction', 'central', 'terminal', 'main', 'city', 'cantt', 'cantonment']
-                is_major = any(keyword in name.lower() for keyword in major_keywords)
-                
-                if is_major:
-                    infrastructure['major_stations'].append({**base_data, 'type': 'major'})
-                else:
-                    infrastructure['stations'].append({**base_data, 'type': 'regular'})
+                infrastructure['stations'].append(base_data)
             elif railway_type == 'signal':
                 # Include tags for signal type classification
                 signal_data = {**base_data}
@@ -191,12 +160,32 @@ def create_enhanced_map(infrastructure, selected_states):
             if track.get('electrified'):
                 popup_text += " (Electrified)"
             
-            # Add speed limit information if available
+            # Add enhanced speed limit and topographical information if available
             if 'speed_limit_kmh' in track:
                 speed_limit = track['speed_limit_kmh']
                 classification = track.get('classification', 'unknown')
-                popup_text += f"<br>� Speed Limit: {speed_limit} km/h ({classification})"
+                factors = track.get('factors', {})
+                
+                popup_text += f"<br>🚄 Speed Limit: {speed_limit} km/h ({classification})"
                 tooltip_text += f" | {speed_limit} km/h"
+                
+                # Add gradient and banking information
+                if 'max_gradient_percent' in factors:
+                    max_gradient = factors['max_gradient_percent']
+                    popup_text += f"<br>📈 Max Gradient: {max_gradient:.2f}%"
+                
+                if 'banking_angle_degrees' in factors:
+                    banking = factors['banking_angle_degrees']
+                    if banking > 0.5:
+                        popup_text += f"<br>🏗️ Banking: {banking:.1f}°"
+                
+                if 'elevation_range_m' in factors and factors['elevation_range_m'] != 'N/A':
+                    popup_text += f"<br>⛰️ Elevation: {factors['elevation_range_m']} m"
+                
+                if 'curvature' in factors:
+                    curvature = factors['curvature']
+                    if curvature > 5:
+                        popup_text += f"<br>🌀 Curvature: {curvature:.1f}°/km"
                 
                 # Color-code tracks by speed limit for better visualization
                 if speed_limit >= 130:
@@ -305,9 +294,13 @@ def create_enhanced_map(infrastructure, selected_states):
             weight=1
         ).add_to(m)
     
-    # Add regular stations with importance-based sizing and coloring
+    # Add all stations with importance-based sizing and coloring
     filtered_stations = filter_by_state(infrastructure['stations'])
-    for station in filtered_stations[:400]:
+    
+    # Sort stations by importance score if available, then by name
+    filtered_stations.sort(key=lambda x: (x.get('importance_score', 0), x.get('name', '')), reverse=True)
+    
+    for station in filtered_stations[:600]:  # Show more stations since we're not separating them
         # Determine radius and color based on importance if available
         radius = 4
         color = '#3498DB'  # Default blue
@@ -317,26 +310,40 @@ def create_enhanced_map(infrastructure, selected_states):
             importance_score = station['importance_score']
             importance_category = station.get('importance_category', 'unknown')
             
-            # Size based on importance
+            # Size and color based on importance - enhanced for high importance stations
             if importance_score >= 80:
-                radius = 7
-                color = '#E74C3C'  # Red for critical
+                radius = 12
+                color = '#C0392B'  # Dark red for critical
             elif importance_score >= 65:
-                radius = 6
-                color = '#E67E22'  # Orange for major
+                radius = 10
+                color = '#E74C3C'  # Red for major
             elif importance_score >= 50:
-                radius = 5
-                color = '#F39C12'  # Dark orange for important
+                radius = 8
+                color = '#E67E22'  # Orange for important
             elif importance_score >= 35:
-                radius = 4
-                color = '#F1C40F'  # Yellow for moderate
+                radius = 6
+                color = '#F39C12'  # Dark orange for moderate
+            elif importance_score >= 20:
+                radius = 5
+                color = '#F1C40F'  # Yellow for minor
             else:
                 radius = 3
-                color = '#3498DB'  # Blue for minor/local
+                color = '#3498DB'  # Blue for local
             
             importance_info = f"<br><span style='color: #8E44AD;'>📊 Importance: {importance_score:.1f} ({importance_category})</span>"
             if 'importance_rank' in station:
                 importance_info += f"<br><span style='color: #8E44AD;'>🏆 Rank: #{station['importance_rank']}</span>"
+            
+            # Add station type indicator based on importance
+            if importance_score >= 50:
+                station_type = "🏛️ Major Station"
+            else:
+                station_type = "🚉 Station"
+        else:
+            station_type = "🚉 Station"
+        
+        # Enhanced weight for more important stations
+        weight = 3 if radius >= 8 else 1
         
         folium.CircleMarker(
             location=[station['lat'], station['lon']],
@@ -344,66 +351,18 @@ def create_enhanced_map(infrastructure, selected_states):
             popup=folium.Popup(
                 f"""
                 <div style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px;">
-                    <b style="color: #2E86AB;">🚉 {station['name']}</b><br>
+                    <b style="color: #2E86AB;">{station_type} {station['name']}</b><br>
                     <span style="color: #666;">📍 {station['state']}</span>{importance_info}<br>
-                    <span style="color: #888; font-size: 12px;">{station['lat']:.4f}, {station['lon']:.4f}</span>
-                </div>
-                """, 
-                max_width=280
-            ),
-            tooltip=f"Station: {station['name']}" + (f" (Score: {station.get('importance_score', 0):.1f})" if 'importance_score' in station else ""),
-            color=color,
-            fillColor=color,
-            fillOpacity=0.9,
-            weight=1
-        ).add_to(m)
-    
-    # Add major stations/junctions with enhanced importance information
-    filtered_major_stations = filter_by_state(infrastructure['major_stations'])
-    for station in filtered_major_stations:
-        # Enhanced sizing and coloring for major stations
-        radius = 10
-        color = '#8E44AD'  # Default purple
-        importance_info = ""
-        
-        if 'importance_score' in station:
-            importance_score = station['importance_score']
-            importance_category = station.get('importance_category', 'unknown')
-            
-            # Enhanced size and color for major stations based on importance
-            if importance_score >= 80:
-                radius = 14
-                color = '#C0392B'  # Dark red for critical major stations
-            elif importance_score >= 65:
-                radius = 12
-                color = '#E74C3C'  # Red for major
-            else:
-                radius = 10
-                color = '#8E44AD'  # Purple for regular major
-            
-            importance_info = f"<br><span style='color: #E74C3C;'>📊 Importance: {importance_score:.1f} ({importance_category})</span>"
-            if 'importance_rank' in station:
-                importance_info += f"<br><span style='color: #E74C3C;'>🏆 Rank: #{station['importance_rank']}</span>"
-        
-        folium.CircleMarker(
-            location=[station['lat'], station['lon']],
-            radius=radius,
-            popup=folium.Popup(
-                f"""
-                <div style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 16px;">
-                    <b style="color: #8E44AD;">🏛️ {station['name']}</b><br>
-                    <span style="color: #666;">📍 {station['state']}</span><br>
-                    <span style="color: #8E44AD; font-weight: bold;">Major Station/Junction</span>{importance_info}<br>
                     <span style="color: #888; font-size: 12px;">{station['lat']:.4f}, {station['lon']:.4f}</span>
                 </div>
                 """, 
                 max_width=300
             ),
-            tooltip=f"Major Station: {station['name']}" + (f" (Score: {station.get('importance_score', 0):.1f})" if 'importance_score' in station else ""),
+            tooltip=f"Station: {station['name']}" + (f" (Score: {station.get('importance_score', 0):.1f})" if 'importance_score' in station else ""),
             color=color,
             fillColor=color,
-            fillOpacity=1.0,
-            weight=3
+            fillOpacity=0.9,
+            weight=weight
         ).add_to(m)
     
     return m
@@ -421,11 +380,12 @@ def add_legend(m):
         <div style="border-bottom: 1px solid #eee; padding-bottom: 6px; margin-bottom: 6px;">
             <b>Station Importance (Size & Color)</b>
         </div>
-        <p style="margin: 3px 0; color: #C0392B;"><span style="color: #C0392B; font-size: 18px;">●</span> Critical (80+ score)</p>
-        <p style="margin: 3px 0; color: #E74C3C;"><span style="color: #E74C3C; font-size: 16px;">●</span> Major (65+ score)</p>
-        <p style="margin: 3px 0; color: #F39C12;"><span style="color: #F39C12; font-size: 14px;">●</span> Important (50+ score)</p>
-        <p style="margin: 3px 0; color: #F1C40F;"><span style="color: #F1C40F; font-size: 12px;">●</span> Moderate (35+ score)</p>
-        <p style="margin: 3px 0; color: #3498DB;"><span style="color: #3498DB; font-size: 10px;">●</span> Minor/Local (&lt;35 score)</p>
+        <p style="margin: 3px 0; color: #C0392B;"><span style="color: #C0392B; font-size: 20px;">●</span> Critical (80+ score)</p>
+        <p style="margin: 3px 0; color: #E74C3C;"><span style="color: #E74C3C; font-size: 18px;">●</span> Major (65+ score)</p>
+        <p style="margin: 3px 0; color: #E67E22;"><span style="color: #E67E22; font-size: 16px;">●</span> Important (50+ score)</p>
+        <p style="margin: 3px 0; color: #F39C12;"><span style="color: #F39C12; font-size: 14px;">●</span> Moderate (35+ score)</p>
+        <p style="margin: 3px 0; color: #F1C40F;"><span style="color: #F1C40F; font-size: 12px;">●</span> Minor (20+ score)</p>
+        <p style="margin: 3px 0; color: #3498DB;"><span style="color: #3498DB; font-size: 10px;">●</span> Local (&lt;20 score)</p>
         
         <div style="border-bottom: 1px solid #eee; padding-bottom: 6px; margin: 6px 0;">
             <b>Railway Signals</b>
@@ -538,8 +498,7 @@ def main():
         # Infrastructure type filters
         st.sidebar.subheader("🔧 Infrastructure Types")
         show_tracks = st.sidebar.checkbox("Railway Tracks", value=True)
-        show_stations = st.sidebar.checkbox("Regular Stations", value=True)
-        show_major_stations = st.sidebar.checkbox("Major Stations/Junctions", value=True)
+        show_stations = st.sidebar.checkbox("Stations", value=True)
         show_signals = st.sidebar.checkbox("Signals", value=True)
         show_milestones = st.sidebar.checkbox("Milestones", value=True)
         
@@ -551,18 +510,21 @@ def main():
             
             filtered_infrastructure = {
                 'stations': filter_by_state(infrastructure['stations']),
-                'major_stations': filter_by_state(infrastructure['major_stations']),
                 'signals': filter_by_state(infrastructure['signals']),
                 'milestones': filter_by_state(infrastructure['milestones']),
                 'tracks': filter_by_state(infrastructure['tracks'])
             }
             
+            # Separate stations by importance for display purposes
+            major_stations = [s for s in filtered_infrastructure['stations'] if s.get('importance_score', 0) >= 50]
+            regular_stations = [s for s in filtered_infrastructure['stations'] if s.get('importance_score', 0) < 50]
+            
             # Display metrics
             col1, col2, col3, col4, col5 = st.columns(5)
             with col1:
-                st.metric("🚉 Regular Stations", len(filtered_infrastructure['stations']))
+                st.metric("🚉 All Stations", len(filtered_infrastructure['stations']))
             with col2:
-                st.metric("🏛️ Major Stations/Junctions", len(filtered_infrastructure['major_stations']))
+                st.metric("🏛️ Major Stations", len(major_stations))
             with col3:
                 st.metric("🚦 Signals", len(filtered_infrastructure['signals']))
             with col4:
@@ -618,7 +580,6 @@ def main():
                 # Apply infrastructure type filters
                 display_infrastructure = {
                     'stations': filtered_infrastructure['stations'] if show_stations else [],
-                    'major_stations': filtered_infrastructure['major_stations'] if show_major_stations else [],
                     'signals': filtered_infrastructure['signals'] if show_signals else [],
                     'milestones': filtered_infrastructure['milestones'] if show_milestones else [],
                     'tracks': filtered_infrastructure['tracks'] if show_tracks else []
@@ -640,25 +601,38 @@ def main():
                 if 'infrastructure_analysis' in data:
                     analysis = data['infrastructure_analysis']
                     
-                    if st.expander("🚄 Speed Limits & Station Rankings"):
+                    if st.expander("🚄 Speed Limits, Elevation & Station Rankings"):
                         col1, col2 = st.columns(2)
                         
                         with col1:
-                            st.subheader("🚅 Speed Limit Analysis")
+                            st.subheader("🚅 Speed & Topography Analysis")
                             if 'speed_statistics' in analysis:
                                 speed_stats = analysis['speed_statistics']
                                 st.metric("Tracks with Speed Limits", speed_stats.get('total_tracks', 0))
-                                st.metric("Average Speed Limit", f"{speed_stats.get('average_speed', 0):.1f} km/h")
+                                
+                                col1a, col1b = st.columns(2)
+                                with col1a:
+                                    st.metric("Avg Speed Limit", f"{speed_stats.get('average_speed', 0):.1f} km/h")
+                                with col1b:
+                                    st.metric("Avg Gradient", f"{speed_stats.get('average_gradient', 0):.2f}%")
+                                
+                                if 'average_banking' in speed_stats:
+                                    st.metric("Average Banking", f"{speed_stats.get('average_banking', 0):.1f}°")
                                 
                                 if 'classification_distribution' in speed_stats:
                                     st.write("**Speed Classifications:**")
                                     for classification, count in speed_stats['classification_distribution'].items():
                                         st.write(f"• {classification.title()}: {count} tracks")
                                 
-                                if 'speed_distribution' in speed_stats:
-                                    st.write("**Speed Distribution:**")
-                                    for speed_range, count in speed_stats['speed_distribution'].items():
-                                        st.write(f"• {speed_range} km/h: {count} tracks")
+                                if 'gradient_distribution' in speed_stats:
+                                    st.write("**Gradient Distribution:**")
+                                    for gradient_cat, count in speed_stats['gradient_distribution'].items():
+                                        st.write(f"• {gradient_cat.replace('_', ' ').title()}: {count} tracks")
+                                
+                                if 'banking_distribution' in speed_stats:
+                                    st.write("**Banking Distribution:**")
+                                    for banking_cat, count in speed_stats['banking_distribution'].items():
+                                        st.write(f"• {banking_cat.replace('_', ' ').title()}: {count} tracks")
                         
                         with col2:
                             st.subheader("🏛️ Station Importance Rankings")
@@ -695,24 +669,30 @@ def main():
                 if st.expander("📊 Infrastructure Breakdown"):
                     st.subheader("Station Details")
                     
-                    all_stations = filtered_infrastructure['stations'] + filtered_infrastructure['major_stations']
-                    major_stations = filtered_infrastructure['major_stations']
-                    regular_stations = filtered_infrastructure['stations']
+                    all_stations = filtered_infrastructure['stations']
+                    # Separate by importance for display
+                    major_stations = [s for s in all_stations if s.get('importance_score', 0) >= 50]
+                    regular_stations = [s for s in all_stations if s.get('importance_score', 0) < 50]
                     
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.metric("Major Stations/Junctions", len(major_stations))
+                        st.metric("Major Stations (Importance ≥50)", len(major_stations))
                         if major_stations:
-                            st.write("**Major Stations/Junctions:**")
-                            for station in major_stations[:10]:  # Show first 10
-                                st.write(f"• {station['name']} ({station['state']})")
+                            st.write("**Major Stations (sorted by importance):**")
+                            # Sort by importance score
+                            major_stations_sorted = sorted(major_stations, key=lambda x: x.get('importance_score', 0), reverse=True)
+                            for station in major_stations_sorted[:10]:  # Show first 10
+                                score = station.get('importance_score', 0)
+                                st.write(f"• {station['name']} ({station['state']}) - Score: {score:.1f}")
                     
                     with col2:
-                        st.metric("Regular Stations", len(regular_stations))
+                        st.metric("Regular Stations (Importance <50)", len(regular_stations))
                         if regular_stations:
                             st.write("**Regular Stations (sample):**")
                             for station in regular_stations[:10]:  # Show first 10
-                                st.write(f"• {station['name']} ({station['state']})")
+                                score = station.get('importance_score', 0)
+                                score_text = f" - Score: {score:.1f}" if score > 0 else ""
+                                st.write(f"• {station['name']} ({station['state']}){score_text}")
                 
                 # Station search
                 st.subheader("🔍 Infrastructure Search")
@@ -753,7 +733,7 @@ def main():
             
             # Data export option
             if st.checkbox("🗂️ Show Infrastructure Data"):
-                tab1, tab2, tab3, tab4, tab5 = st.tabs(["Regular Stations", "Major Stations/Junctions", "Signals", "Milestones", "Track Segments"])
+                tab1, tab2, tab3, tab4 = st.tabs(["All Stations", "Signals", "Milestones", "Track Segments"])
                 
                 with tab1:
                     if filtered_infrastructure['stations']:
@@ -763,35 +743,25 @@ def main():
                             df = df.sort_values('importance_score', ascending=False)
                         st.dataframe(df, use_container_width=True)
                     else:
-                        st.info("No regular stations found")
+                        st.info("No stations found")
                 
                 with tab2:
-                    if filtered_infrastructure['major_stations']:
-                        df = pd.DataFrame(filtered_infrastructure['major_stations'])
-                        # Show importance rankings if available
-                        if 'importance_score' in df.columns:
-                            df = df.sort_values('importance_score', ascending=False)
-                        st.dataframe(df, use_container_width=True)
-                    else:
-                        st.info("No major stations/junctions found")
-                
-                with tab3:
                     if filtered_infrastructure['signals']:
                         df = pd.DataFrame(filtered_infrastructure['signals'])
                         st.dataframe(df, use_container_width=True)
                     else:
                         st.info("No signals found")
                 
-                with tab4:
+                with tab3:
                     if filtered_infrastructure['milestones']:
                         df = pd.DataFrame(filtered_infrastructure['milestones'])
                         st.dataframe(df, use_container_width=True)
                     else:
                         st.info("No milestones found")
                 
-                with tab5:
+                with tab4:
                     if filtered_infrastructure['tracks']:
-                        # For tracks, show enhanced info including speed limits
+                        # For tracks, show enhanced info including speed limits, elevation, and banking
                         track_info = []
                         for t in filtered_infrastructure['tracks']:
                             info = {
@@ -800,19 +770,39 @@ def main():
                                 'points': len(t['coords']),
                                 'electrified': t.get('electrified', False)
                             }
-                            # Add speed limit info if available
+                            # Add enhanced speed limit and topographical info if available
                             if 'speed_limit_kmh' in t:
                                 info['speed_limit_kmh'] = t['speed_limit_kmh']
                                 info['classification'] = t.get('classification', 'unknown')
                                 if 'factors' in t:
-                                    info['curvature'] = t['factors'].get('curvature', 0)
-                                    info['urban'] = t['factors'].get('urban', False)
+                                    factors = t['factors']
+                                    info['curvature_deg_km'] = factors.get('curvature', 0)
+                                    info['max_gradient_percent'] = factors.get('max_gradient_percent', 0)
+                                    info['avg_gradient_percent'] = factors.get('avg_gradient_percent', 0)
+                                    info['banking_angle_deg'] = factors.get('banking_angle_degrees', 0)
+                                    info['elevation_range_m'] = factors.get('elevation_range_m', 'N/A')
+                                    info['urban'] = factors.get('urban', False)
+                                    info['min_station_distance_km'] = factors.get('min_station_distance_km', 0)
                             track_info.append(info)
                         
                         df = pd.DataFrame(track_info)
+                        # Sort by speed limit, then by gradient
                         if 'speed_limit_kmh' in df.columns:
-                            df = df.sort_values('speed_limit_kmh', ascending=False)
+                            df = df.sort_values(['speed_limit_kmh', 'max_gradient_percent'], ascending=[False, True])
                         st.dataframe(df, use_container_width=True)
+                        
+                        # Show summary statistics
+                        if 'max_gradient_percent' in df.columns:
+                            st.subheader("📊 Track Summary")
+                            col1, col2, col3, col4 = st.columns(4)
+                            with col1:
+                                st.metric("Max Speed", f"{df['speed_limit_kmh'].max():.0f} km/h" if 'speed_limit_kmh' in df.columns else "N/A")
+                            with col2:
+                                st.metric("Steepest Gradient", f"{df['max_gradient_percent'].max():.2f}%" if 'max_gradient_percent' in df.columns else "N/A")
+                            with col3:
+                                st.metric("Max Banking", f"{df['banking_angle_deg'].max():.1f}°" if 'banking_angle_deg' in df.columns else "N/A")
+                            with col4:
+                                st.metric("Sharpest Curve", f"{df['curvature_deg_km'].max():.1f}°/km" if 'curvature_deg_km' in df.columns else "N/A")
                     else:
                         st.info("No tracks found")
         else:

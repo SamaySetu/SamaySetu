@@ -9,7 +9,6 @@ def extract_infrastructure(elements):
     """Extract infrastructure from OSM elements for signal synthesis"""
     infrastructure = {
         'stations': [],
-        'major_stations': [],
         'signals': [],
         'milestones': [],
         'tracks': [],
@@ -38,15 +37,9 @@ def extract_infrastructure(elements):
                 'railway_type': railway_type
             }
             
-            # Categorize stations and junctions
+            # Categorize all stations equally (no artificial major/regular split)
             if railway_type == 'station' or railway_type == 'junction':
-                major_keywords = ['jn', 'junction', 'central', 'terminal', 'main', 'city', 'cantt', 'cantonment']
-                is_major = any(keyword in name.lower() for keyword in major_keywords)
-                
-                if is_major:
-                    infrastructure['major_stations'].append({**base_data, 'type': 'major'})
-                else:
-                    infrastructure['stations'].append({**base_data, 'type': 'regular'})
+                infrastructure['stations'].append({**base_data, 'type': 'station'})
             elif railway_type == 'signal':
                 infrastructure['signals'].append(base_data)
             elif railway_type == 'milestone' or 'milestone' in elem.get('tags', {}):
@@ -197,16 +190,14 @@ def save_split_data(infrastructure, synthetic_signals, metadata):
     data_dir = os.path.join(os.path.dirname(__file__), '..', 'data')
     os.makedirs(data_dir, exist_ok=True)
     
-    # Save stations (combine regular and major stations)
-    all_stations = infrastructure.get('stations', []) + infrastructure.get('major_stations', [])
+    # Save stations (all stations together)
+    all_stations = infrastructure.get('stations', [])
     stations_data = {
         'stations': all_stations,
         'metadata': {
             **metadata,
             'file_type': 'stations',
-            'total_stations': len(all_stations),
-            'regular_stations': len(infrastructure.get('stations', [])),
-            'major_stations': len(infrastructure.get('major_stations', []))
+            'total_stations': len(all_stations)
         }
     }
     
@@ -276,7 +267,6 @@ def save_split_data(infrastructure, synthetic_signals, metadata):
     combined_data = {
         'elements': (infrastructure.get('signals', []) + 
                     infrastructure.get('stations', []) + 
-                    infrastructure.get('major_stations', []) + 
                     infrastructure.get('milestones', []) + 
                     synthetic_signals),
         'metadata': metadata,
@@ -285,9 +275,7 @@ def save_split_data(infrastructure, synthetic_signals, metadata):
             'station_rankings': infrastructure.get('station_rankings', {}),
             'analysis_complete': True
         }
-    }
-    
-    # Add tracks as simplified elements for backward compatibility
+    }        # Add tracks as simplified elements for backward compatibility
     for track in infrastructure.get('tracks', []):
         # Convert track to elements format (simplified)
         track_element = {
@@ -320,8 +308,7 @@ def main():
         infrastructure = extract_infrastructure(data['elements'])
         
         print(f"Extracted infrastructure:")
-        print(f"  - Regular stations: {len(infrastructure['stations'])}")
-        print(f"  - Major stations: {len(infrastructure['major_stations'])}")
+        print(f"  - Stations: {len(infrastructure['stations'])}")
         print(f"  - Existing signals: {len(infrastructure['signals'])}")
         print(f"  - Track segments: {len(infrastructure['tracks'])}")
         print(f"  - Milestones: {len(infrastructure['milestones'])}")
@@ -336,6 +323,10 @@ def main():
         if algorithms_path not in sys.path:
             sys.path.insert(0, algorithms_path)
         from speed_limits import add_speed_limits_to_tracks
+        
+        print("Using Open-Elevation API (free, reliable)")
+        print("   Elevation functionality integrated in speed_limits module")
+        
         infrastructure = add_speed_limits_to_tracks(infrastructure)
         
         # Calculate station importance rankings
