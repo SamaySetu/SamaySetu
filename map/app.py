@@ -55,7 +55,11 @@ def extract_infrastructure(elements):
                 else:
                     infrastructure['stations'].append({**base_data, 'type': 'regular'})
             elif railway_type == 'signal':
-                infrastructure['signals'].append(base_data)
+                # Include tags for signal type classification
+                signal_data = {**base_data}
+                if 'tags' in elem:
+                    signal_data['tags'] = elem['tags']
+                infrastructure['signals'].append(signal_data)
             elif railway_type == 'milestone' or 'milestone' in elem.get('tags', {}):
                 infrastructure['milestones'].append(base_data)
         
@@ -155,13 +159,41 @@ def create_enhanced_map(infrastructure, selected_states):
         selected_tracks = tracks[:limits[category]]
         
         for track in selected_tracks:
+            # Enhanced popup with speed limit information if available
+            popup_text = f"🛤️ {category.title()} Track"
+            tooltip_text = f"{category.title()} Track"
+            
+            if track.get('electrified'):
+                popup_text += " (Electrified)"
+            
+            # Add speed limit information if available
+            if 'speed_limit_kmh' in track:
+                speed_limit = track['speed_limit_kmh']
+                classification = track.get('classification', 'unknown')
+                popup_text += f"<br>� Speed Limit: {speed_limit} km/h ({classification})"
+                tooltip_text += f" | {speed_limit} km/h"
+                
+                # Color-code tracks by speed limit for better visualization
+                if speed_limit >= 130:
+                    track_color = '#E74C3C'  # Red for high speed
+                elif speed_limit >= 100:
+                    track_color = '#F39C12'  # Orange for express
+                elif speed_limit >= 80:
+                    track_color = '#F1C40F'  # Yellow for fast
+                elif speed_limit >= 60:
+                    track_color = '#2ECC71'  # Green for medium
+                else:
+                    track_color = '#3498DB'  # Blue for slow/restricted
+            else:
+                track_color = data['color']  # Use default color if no speed limit
+            
             folium.PolyLine(
                 locations=track['coords'],
-                color=data['color'],
+                color=track_color,
                 weight=data['weight'],
                 opacity=data['opacity'],
-                popup=f"🛤️ {category.title()} Track" + (f" (Electrified)" if track.get('electrified') else ""),
-                tooltip=f"{category.title()} Track"
+                popup=popup_text,
+                tooltip=tooltip_text
             ).add_to(m)
     
     # Add milestones (smallest)
@@ -178,63 +210,173 @@ def create_enhanced_map(infrastructure, selected_states):
             weight=1
         ).add_to(m)
     
-    # Add signals
+    # Add signals with intelligent prioritization
     filtered_signals = filter_by_state(infrastructure['signals'])
-    for signal in filtered_signals[:300]:
+    
+    # Prioritize signals for display: station signals first, then others
+    station_signals = []
+    junction_signals = []
+    block_signals = []
+    other_signals = []
+    
+    for signal in filtered_signals:
+        signal_type = signal.get('tags', {}).get('signal_type', 'unspecified')
+        signal_function = signal.get('tags', {}).get('signal_function', 'unknown')
+        
+        if signal_type in ['outer', 'home', 'distant', 'starter']:
+            station_signals.append(signal)
+        elif signal_type == 'junction' or signal_function == 'interlocking':
+            junction_signals.append(signal)
+        elif signal_type == 'block' or signal_function == 'block':
+            block_signals.append(signal)
+        else:
+            other_signals.append(signal)
+    
+    # Display signals in priority order with appropriate limits
+    signals_to_display = (
+        station_signals[:500] +           # Show more station-related signals
+        junction_signals[:300] +          # Show junction signals
+        block_signals[:800] +             # Show many block signals for network coverage
+        other_signals[:200]               # Show some other signals
+    )
+    
+    # Add different colors for different signal types
+    for signal in signals_to_display:
+        signal_type = signal.get('tags', {}).get('signal_type', 'unspecified')
+        signal_function = signal.get('tags', {}).get('signal_function', 'unknown')
+        
+        # Choose color based on signal type/function
+        if signal_type in ['outer', 'home', 'distant', 'starter']:
+            color = '#E74C3C'  # Red for station signals
+            radius = 4
+        elif signal_type == 'junction' or signal_function == 'interlocking':
+            color = '#9B59B6'  # Purple for junction signals
+            radius = 5
+        elif signal_type == 'block' or signal_function == 'block':
+            color = '#3498DB'  # Blue for block signals
+            radius = 3
+        else:
+            color = '#F39C12'  # Orange for other signals
+            radius = 3
+        
+        # Enhanced popup with signal details
+        signal_name = signal.get('name', 'Unknown Signal')
+        signal_details = f"🚦 {signal_name}"
+        if signal_type != 'unspecified':
+            signal_details += f"<br>Type: {signal_type.title()}"
+        if signal_function != 'unknown':
+            signal_details += f"<br>Function: {signal_function.title()}"
+        if signal.get('tags', {}).get('synthetic') == 'true':
+            signal_details += f"<br><small>Synthetic Signal</small>"
+        
         folium.CircleMarker(
             location=[signal['lat'], signal['lon']],
-            radius=3,
-            popup=f"🚦 Signal: {signal['name']}",
-            tooltip=f"Signal: {signal['name']}",
-            color='#F39C12',
-            fillColor='#F39C12',
+            radius=radius,
+            popup=folium.Popup(signal_details, max_width=250),
+            tooltip=f"Signal: {signal_name}",
+            color=color,
+            fillColor=color,
             fillOpacity=0.8,
             weight=1
         ).add_to(m)
     
-    # Add regular stations
+    # Add regular stations with importance-based sizing and coloring
     filtered_stations = filter_by_state(infrastructure['stations'])
     for station in filtered_stations[:400]:
+        # Determine radius and color based on importance if available
+        radius = 4
+        color = '#3498DB'  # Default blue
+        importance_info = ""
+        
+        if 'importance_score' in station:
+            importance_score = station['importance_score']
+            importance_category = station.get('importance_category', 'unknown')
+            
+            # Size based on importance
+            if importance_score >= 80:
+                radius = 7
+                color = '#E74C3C'  # Red for critical
+            elif importance_score >= 65:
+                radius = 6
+                color = '#E67E22'  # Orange for major
+            elif importance_score >= 50:
+                radius = 5
+                color = '#F39C12'  # Dark orange for important
+            elif importance_score >= 35:
+                radius = 4
+                color = '#F1C40F'  # Yellow for moderate
+            else:
+                radius = 3
+                color = '#3498DB'  # Blue for minor/local
+            
+            importance_info = f"<br><span style='color: #8E44AD;'>📊 Importance: {importance_score:.1f} ({importance_category})</span>"
+            if 'importance_rank' in station:
+                importance_info += f"<br><span style='color: #8E44AD;'>🏆 Rank: #{station['importance_rank']}</span>"
+        
         folium.CircleMarker(
             location=[station['lat'], station['lon']],
-            radius=4,
+            radius=radius,
             popup=folium.Popup(
                 f"""
                 <div style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 14px;">
                     <b style="color: #2E86AB;">🚉 {station['name']}</b><br>
-                    <span style="color: #666;">📍 {station['state']}</span><br>
+                    <span style="color: #666;">📍 {station['state']}</span>{importance_info}<br>
                     <span style="color: #888; font-size: 12px;">{station['lat']:.4f}, {station['lon']:.4f}</span>
                 </div>
                 """, 
                 max_width=280
             ),
-            tooltip=f"Station: {station['name']}",
-            color='#3498DB',
-            fillColor='#3498DB',
+            tooltip=f"Station: {station['name']}" + (f" (Score: {station.get('importance_score', 0):.1f})" if 'importance_score' in station else ""),
+            color=color,
+            fillColor=color,
             fillOpacity=0.9,
             weight=1
         ).add_to(m)
     
-    # Add major stations/junctions (combined category - most prominent)
+    # Add major stations/junctions with enhanced importance information
     filtered_major_stations = filter_by_state(infrastructure['major_stations'])
     for station in filtered_major_stations:
+        # Enhanced sizing and coloring for major stations
+        radius = 10
+        color = '#8E44AD'  # Default purple
+        importance_info = ""
+        
+        if 'importance_score' in station:
+            importance_score = station['importance_score']
+            importance_category = station.get('importance_category', 'unknown')
+            
+            # Enhanced size and color for major stations based on importance
+            if importance_score >= 80:
+                radius = 14
+                color = '#C0392B'  # Dark red for critical major stations
+            elif importance_score >= 65:
+                radius = 12
+                color = '#E74C3C'  # Red for major
+            else:
+                radius = 10
+                color = '#8E44AD'  # Purple for regular major
+            
+            importance_info = f"<br><span style='color: #E74C3C;'>📊 Importance: {importance_score:.1f} ({importance_category})</span>"
+            if 'importance_rank' in station:
+                importance_info += f"<br><span style='color: #E74C3C;'>🏆 Rank: #{station['importance_rank']}</span>"
+        
         folium.CircleMarker(
             location=[station['lat'], station['lon']],
-            radius=10,
+            radius=radius,
             popup=folium.Popup(
                 f"""
                 <div style="font-family: 'Segoe UI', Arial, sans-serif; font-size: 16px;">
                     <b style="color: #8E44AD;">🏛️ {station['name']}</b><br>
                     <span style="color: #666;">📍 {station['state']}</span><br>
-                    <span style="color: #8E44AD; font-weight: bold;">Major Station/Junction</span><br>
+                    <span style="color: #8E44AD; font-weight: bold;">Major Station/Junction</span>{importance_info}<br>
                     <span style="color: #888; font-size: 12px;">{station['lat']:.4f}, {station['lon']:.4f}</span>
                 </div>
                 """, 
                 max_width=300
             ),
-            tooltip=f"Major Station: {station['name']}",
-            color='#8E44AD',
-            fillColor='#8E44AD',
+            tooltip=f"Major Station: {station['name']}" + (f" (Score: {station.get('importance_score', 0):.1f})" if 'importance_score' in station else ""),
+            color=color,
+            fillColor=color,
             fillOpacity=1.0,
             weight=3
         ).add_to(m)
@@ -242,23 +384,44 @@ def create_enhanced_map(infrastructure, selected_states):
     return m
 
 def add_legend(m):
-    # Add a custom legend to the map
+    # Add a custom legend to the map with enhanced information
     legend_html = '''
     <div style="position: fixed; 
-                top: 10px; right: 10px; width: 240px; height: auto; 
+                top: 10px; right: 10px; width: 280px; height: auto; 
                 background-color: white; border:2px solid grey; z-index:9999; 
-                font-size:13px; font-family: 'Segoe UI', Arial, sans-serif;
+                font-size:12px; font-family: 'Segoe UI', Arial, sans-serif;
                 padding: 10px; border-radius: 10px; box-shadow: 0 0 15px rgba(0,0,0,0.2);">
         <h4 style="margin: 0 0 8px 0; color: #2C3E50;">🗺️ Railway Infrastructure</h4>
+        
         <div style="border-bottom: 1px solid #eee; padding-bottom: 6px; margin-bottom: 6px;">
-            <b>Stations & Infrastructure</b>
+            <b>Station Importance (Size & Color)</b>
         </div>
-        <p style="margin: 3px 0; color: #8E44AD;"><span style="color: #8E44AD; font-size: 16px;">●</span> Major Stations/Junctions</p>
-        <p style="margin: 3px 0; color: #3498DB;"><span style="color: #3498DB; font-size: 12px;">●</span> Regular Stations</p>
-        <p style="margin: 3px 0; color: #F39C12;"><span style="color: #F39C12; font-size: 10px;">●</span> Signals</p>
-        <p style="margin: 3px 0; color: #95A5A6;"><span style="color: #95A5A6; font-size: 8px;">●</span> Milestones</p>
+        <p style="margin: 3px 0; color: #C0392B;"><span style="color: #C0392B; font-size: 18px;">●</span> Critical (80+ score)</p>
+        <p style="margin: 3px 0; color: #E74C3C;"><span style="color: #E74C3C; font-size: 16px;">●</span> Major (65+ score)</p>
+        <p style="margin: 3px 0; color: #F39C12;"><span style="color: #F39C12; font-size: 14px;">●</span> Important (50+ score)</p>
+        <p style="margin: 3px 0; color: #F1C40F;"><span style="color: #F1C40F; font-size: 12px;">●</span> Moderate (35+ score)</p>
+        <p style="margin: 3px 0; color: #3498DB;"><span style="color: #3498DB; font-size: 10px;">●</span> Minor/Local (&lt;35 score)</p>
+        
         <div style="border-bottom: 1px solid #eee; padding-bottom: 6px; margin: 6px 0;">
-            <b>Railway Tracks</b>
+            <b>Railway Signals</b>
+        </div>
+        <p style="margin: 2px 0; color: #E74C3C;"><span style="color: #E74C3C; font-size: 10px;">●</span> Station Signals (Home/Distant/Outer)</p>
+        <p style="margin: 2px 0; color: #9B59B6;"><span style="color: #9B59B6; font-size: 11px;">●</span> Junction/Interlocking Signals</p>
+        <p style="margin: 2px 0; color: #3498DB;"><span style="color: #3498DB; font-size: 9px;">●</span> Block Signals</p>
+        <p style="margin: 2px 0; color: #F39C12;"><span style="color: #F39C12; font-size: 9px;">●</span> Other Signals</p>
+        <p style="margin: 3px 0; color: #95A5A6;"><span style="color: #95A5A6; font-size: 8px;">●</span> Milestones</p>
+        
+        <div style="border-bottom: 1px solid #eee; padding-bottom: 6px; margin: 6px 0;">
+            <b>Track Speed Limits (Color Coded)</b>
+        </div>
+        <p style="margin: 2px 0; color: #E74C3C;"><span style="font-weight: bold; color: #E74C3C;">━━━</span> High Speed (130+ km/h)</p>
+        <p style="margin: 2px 0; color: #F39C12;"><span style="font-weight: bold; color: #F39C12;">━━━</span> Express (100-129 km/h)</p>
+        <p style="margin: 2px 0; color: #F1C40F;"><span style="font-weight: bold; color: #F1C40F;">━━━</span> Fast (80-99 km/h)</p>
+        <p style="margin: 2px 0; color: #2ECC71;"><span style="font-weight: bold; color: #2ECC71;">━━━</span> Medium (60-79 km/h)</p>
+        <p style="margin: 2px 0; color: #3498DB;"><span style="font-weight: bold; color: #3498DB;">━━━</span> Slow/Restricted (&lt;60 km/h)</p>
+        
+        <div style="border-bottom: 1px solid #eee; padding-bottom: 6px; margin: 6px 0;">
+            <b>Track Types</b>
         </div>
         <p style="margin: 2px 0; color: #2E8B57;"><span style="font-weight: bold; color: #2E8B57;">━━━</span> Main Lines</p>
         <p style="margin: 2px 0; color: #4A7C59;"><span style="font-weight: bold; color: #4A7C59;">━━</span> Branch Lines</p>
@@ -266,6 +429,10 @@ def add_legend(m):
         <p style="margin: 2px 0; color: #FF6347;"><span style="color: #FF6347;">━━</span> Industrial</p>
         <p style="margin: 2px 0; color: #9932CC;"><span style="color: #9932CC;">━━</span> Narrow Gauge</p>
         <p style="margin: 2px 0; color: #6B8E23;"><span style="color: #6B8E23;">━</span> Other Tracks</p>
+        
+        <div style="margin-top: 8px; font-size: 10px; color: #7F8C8D;">
+            💡 Hover/click elements for detailed info
+        </div>
     </div>
     '''
     m.get_root().html.add_child(folium.Element(legend_html))
@@ -444,6 +611,61 @@ def main():
                 # Map usage guide
                 st.caption("💡 Click markers for details • Different colors represent different infrastructure types • Use sidebar filters to toggle visibility")
                 
+                # Show enhanced analytics if available
+                if 'infrastructure_analysis' in data:
+                    analysis = data['infrastructure_analysis']
+                    
+                    if st.expander("🚄 Speed Limits & Station Rankings"):
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.subheader("🚅 Speed Limit Analysis")
+                            if 'speed_statistics' in analysis:
+                                speed_stats = analysis['speed_statistics']
+                                st.metric("Tracks with Speed Limits", speed_stats.get('total_tracks', 0))
+                                st.metric("Average Speed Limit", f"{speed_stats.get('average_speed', 0):.1f} km/h")
+                                
+                                if 'classification_distribution' in speed_stats:
+                                    st.write("**Speed Classifications:**")
+                                    for classification, count in speed_stats['classification_distribution'].items():
+                                        st.write(f"• {classification.title()}: {count} tracks")
+                                
+                                if 'speed_distribution' in speed_stats:
+                                    st.write("**Speed Distribution:**")
+                                    for speed_range, count in speed_stats['speed_distribution'].items():
+                                        st.write(f"• {speed_range} km/h: {count} tracks")
+                        
+                        with col2:
+                            st.subheader("🏛️ Station Importance Rankings")
+                            if 'station_rankings' in analysis:
+                                rankings = analysis['station_rankings']
+                                st.metric("Ranked Stations", rankings.get('total_stations', 0))
+                                st.metric("Average Importance Score", f"{rankings.get('average_score', 0):.1f}")
+                                
+                                # Show ridership data sources
+                                if 'ridership_data_sources' in rankings:
+                                    st.write("**Ridership Data Sources:**")
+                                    sources = rankings['ridership_data_sources']
+                                    if 'wikipedia' in sources:
+                                        st.write(f"• Wikipedia: {sources['wikipedia']} stations")
+                                    if 'known_data' in sources:
+                                        st.write(f"• Known data: {sources['known_data']} stations")
+                                    if 'estimated' in sources:
+                                        st.write(f"• Estimated: {sources['estimated']} stations")
+                                
+                                if 'category_distribution' in rankings:
+                                    st.write("**Importance Categories:**")
+                                    for category, count in rankings['category_distribution'].items():
+                                        st.write(f"• {category.title()}: {count} stations")
+                                
+                                if 'top_10_stations' in rankings:
+                                    st.write("**Top 5 Most Important Stations:**")
+                                    for i, station in enumerate(rankings['top_10_stations'][:5], 1):
+                                        ridership_text = ""
+                                        if station.get('daily_ridership') != 'N/A':
+                                            ridership_text = f" ({station['daily_ridership']:,} daily)"
+                                        st.write(f"{i}. {station['name']} ({station['score']:.1f}) - {station['category'].title()}{ridership_text}")
+                
                 # Detailed breakdown
                 if st.expander("📊 Infrastructure Breakdown"):
                     st.subheader("Station Details")
@@ -506,11 +728,14 @@ def main():
             
             # Data export option
             if st.checkbox("🗂️ Show Infrastructure Data"):
-                tab1, tab2, tab3, tab4, tab5 = st.tabs(["Regular Stations", "Major Stations/Junctions", "Signals", "Milestones", "Tracks"])
+                tab1, tab2, tab3, tab4, tab5 = st.tabs(["Regular Stations", "Major Stations/Junctions", "Signals", "Milestones", "Track Segments"])
                 
                 with tab1:
                     if filtered_infrastructure['stations']:
                         df = pd.DataFrame(filtered_infrastructure['stations'])
+                        # Show importance rankings if available
+                        if 'importance_score' in df.columns:
+                            df = df.sort_values('importance_score', ascending=False)
                         st.dataframe(df, use_container_width=True)
                     else:
                         st.info("No regular stations found")
@@ -518,6 +743,9 @@ def main():
                 with tab2:
                     if filtered_infrastructure['major_stations']:
                         df = pd.DataFrame(filtered_infrastructure['major_stations'])
+                        # Show importance rankings if available
+                        if 'importance_score' in df.columns:
+                            df = df.sort_values('importance_score', ascending=False)
                         st.dataframe(df, use_container_width=True)
                     else:
                         st.info("No major stations/junctions found")
@@ -538,10 +766,27 @@ def main():
                 
                 with tab5:
                     if filtered_infrastructure['tracks']:
-                        # For tracks, show simplified info (coordinates are too complex for dataframe)
-                        track_info = [{'state': t['state'], 'type': t.get('type', 'main'), 'points': len(t['coords'])} 
-                                    for t in filtered_infrastructure['tracks']]
+                        # For tracks, show enhanced info including speed limits
+                        track_info = []
+                        for t in filtered_infrastructure['tracks']:
+                            info = {
+                                'state': t['state'], 
+                                'type': t.get('type', 'main'), 
+                                'points': len(t['coords']),
+                                'electrified': t.get('electrified', False)
+                            }
+                            # Add speed limit info if available
+                            if 'speed_limit_kmh' in t:
+                                info['speed_limit_kmh'] = t['speed_limit_kmh']
+                                info['classification'] = t.get('classification', 'unknown')
+                                if 'factors' in t:
+                                    info['curvature'] = t['factors'].get('curvature', 0)
+                                    info['urban'] = t['factors'].get('urban', False)
+                            track_info.append(info)
+                        
                         df = pd.DataFrame(track_info)
+                        if 'speed_limit_kmh' in df.columns:
+                            df = df.sort_values('speed_limit_kmh', ascending=False)
                         st.dataframe(df, use_container_width=True)
                     else:
                         st.info("No tracks found")
