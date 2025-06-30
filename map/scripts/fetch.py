@@ -355,7 +355,7 @@ def main():
             'realistic_signals': True,
             'speed_limits_calculated': True,
             'station_rankings_calculated': True,
-            'fetch_version': '3.0'
+            'fetch_version': '4.0'
         }
         
         # Save data split into separate files

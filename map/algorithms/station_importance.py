@@ -4,32 +4,6 @@ import os
 from typing import List, Dict, Tuple
 from collections import defaultdict
 
-# Add current directory to path for wikipedia_ridership import
-current_dir = os.path.dirname(__file__)
-if current_dir not in sys.path:
-    sys.path.append(current_dir)
-
-try:
-    from wikipedia_ridership import (
-        load_ridership_database, 
-        calculate_ridership_score_with_wikipedia,
-        KNOWN_RIDERSHIP_DATA,
-        get_ridership_for_stations,
-        save_ridership_database
-    )
-except ImportError:
-    # Fallback if wikipedia_ridership is not available
-    print("Warning: Wikipedia ridership module not available, using basic estimation")
-    def load_ridership_database():
-        return {}
-    def calculate_ridership_score_with_wikipedia(name, db):
-        return 50  # Default score
-    KNOWN_RIDERSHIP_DATA = {}
-    def get_ridership_for_stations(stations):
-        return {}
-    def save_ridership_database(db):
-        pass
-
 def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculate distance between two points in kilometers using Haversine formula"""
     R = 6371  # Earth's radius in kilometers
@@ -188,21 +162,10 @@ def calculate_strategic_importance(station: Dict, station_name: str) -> int:
     
     return strategic_score
 
-def estimate_ridership_score(station: Dict, station_name: str, connectivity_score: int, urban_score: int, ridership_database: Dict = None) -> int:
+def estimate_ridership_score(station: Dict, station_name: str, connectivity_score: int, urban_score: int) -> int:
     """
-    Estimate ridership importance using actual Wikipedia data if available,
-    otherwise fall back to heuristic estimation.
+    Estimate ridership importance using heuristic estimation based on station characteristics.
     """
-    # Use Wikipedia ridership data if available
-    if ridership_database and station_name in ridership_database:
-        return calculate_ridership_score_with_wikipedia(station_name, ridership_database)
-    
-    # Check known ridership data
-    if station_name in KNOWN_RIDERSHIP_DATA:
-        temp_db = {station_name: KNOWN_RIDERSHIP_DATA[station_name]}
-        return calculate_ridership_score_with_wikipedia(station_name, temp_db)
-    
-    # Fall back to heuristic estimation
     name_lower = station_name.lower()
     
     # Base ridership estimation
@@ -226,7 +189,7 @@ def estimate_ridership_score(station: Dict, station_name: str, connectivity_scor
     
     return min(total_ridership_score, 100)
 
-def calculate_station_importance(station: Dict, all_stations: List[Dict], tracks: List[Dict], ridership_database: Dict = None) -> Dict:
+def calculate_station_importance(station: Dict, all_stations: List[Dict], tracks: List[Dict]) -> Dict:
     """
     Calculate comprehensive importance score for a railway station.
     Returns detailed scoring breakdown.
@@ -240,16 +203,15 @@ def calculate_station_importance(station: Dict, all_stations: List[Dict], tracks
     connectivity_score = calculate_connectivity_score(station, all_stations, tracks)
     urban_score = calculate_urban_importance(station)
     strategic_score = calculate_strategic_importance(station, station_name)
-    ridership_score = estimate_ridership_score(station, station_name, connectivity_score, urban_score, ridership_database)
+    ridership_score = estimate_ridership_score(station, station_name, connectivity_score, urban_score)
     
     # Weighted total importance score
-    # Increase ridership weight since we now have real data for many stations
     weights = {
-        'type': 0.15,
-        'connectivity': 0.20,
-        'urban': 0.20,
+        'type': 0.20,
+        'connectivity': 0.25,
+        'urban': 0.25,
         'strategic': 0.15,
-        'ridership': 0.30  # Increased weight for actual ridership data
+        'ridership': 0.15
     }
     
     total_score = (type_score * weights['type'] + 
@@ -272,17 +234,6 @@ def calculate_station_importance(station: Dict, all_stations: List[Dict], tracks
     else:
         importance_category = 'local'
     
-    # Add ridership data source info if available
-    ridership_source = 'estimated'
-    actual_ridership = None
-    
-    if ridership_database and station_name in ridership_database:
-        ridership_source = 'wikipedia'
-        actual_ridership = ridership_database[station_name].get('daily_passengers')
-    elif station_name in KNOWN_RIDERSHIP_DATA:
-        ridership_source = 'known_data'
-        actual_ridership = KNOWN_RIDERSHIP_DATA[station_name].get('daily_passengers')
-    
     result = {
         'importance_score': round(total_score, 1),
         'importance_category': importance_category,
@@ -294,53 +245,19 @@ def calculate_station_importance(station: Dict, all_stations: List[Dict], tracks
             'strategic_score': strategic_score,
             'ridership_score': ridership_score
         },
-        'weights_used': weights,
-        'ridership_source': ridership_source
+        'weights_used': weights
     }
-    
-    if actual_ridership:
-        result['actual_daily_ridership'] = actual_ridership
     
     return result
 
 def rank_stations_by_importance(infrastructure: Dict) -> Dict:
     """
     Rank all stations by importance and add rankings to the infrastructure data.
-    Now includes Wikipedia ridership data collection.
     """
     all_stations = infrastructure.get('stations', []) + infrastructure.get('major_stations', [])
     tracks = infrastructure.get('tracks', [])
     
     print(f"Calculating importance rankings for {len(all_stations)} stations...")
-    
-    # Load existing ridership database
-    ridership_database = load_ridership_database()
-    print(f"Loaded existing ridership data for {len(ridership_database)} stations")
-    
-    # For major stations without ridership data, try to fetch from Wikipedia
-    major_stations_without_data = []
-    for station in all_stations:
-        station_name = station.get('name', 'Unknown')
-        if (station_name != 'Unknown' and 
-            station_name not in ridership_database and 
-            station_name not in KNOWN_RIDERSHIP_DATA):
-            # Prioritize major stations for Wikipedia lookup
-            if any(keyword in station_name.lower() for keyword in 
-                   ['central', 'junction', 'jn', 'terminal', 'main', 'city', 'cantt']):
-                major_stations_without_data.append(station)
-    
-    # Limit Wikipedia lookups to avoid overwhelming the service
-    if major_stations_without_data:
-        print(f"Found {len(major_stations_without_data)} major stations without ridership data")
-        # Limit to top 50 major stations to be respectful to Wikipedia
-        stations_to_lookup = major_stations_without_data[:50]
-        print(f"Fetching Wikipedia data for {len(stations_to_lookup)} stations...")
-        
-        new_ridership_data = get_ridership_for_stations(stations_to_lookup)
-        ridership_database.update(new_ridership_data)
-        
-        # Save updated database
-        save_ridership_database(ridership_database)
     
     # Calculate importance for each station
     station_importance = []
@@ -349,7 +266,7 @@ def rank_stations_by_importance(infrastructure: Dict) -> Dict:
         if i % 50 == 0:
             print(f"  Processing station {i+1}/{len(all_stations)}")
         
-        importance_data = calculate_station_importance(station, all_stations, tracks, ridership_database)
+        importance_data = calculate_station_importance(station, all_stations, tracks)
         
         # Add importance data to station
         station.update(importance_data)
@@ -371,12 +288,10 @@ def rank_stations_by_importance(infrastructure: Dict) -> Dict:
     category_counts = defaultdict(int)
     type_counts = defaultdict(int)
     score_ranges = defaultdict(int)
-    ridership_sources = defaultdict(int)
     
     for station in all_stations:
         category_counts[station.get('importance_category', 'unknown')] += 1
         type_counts[station.get('station_type', 'unknown')] += 1
-        ridership_sources[station.get('ridership_source', 'unknown')] += 1
         
         score = station.get('importance_score', 0)
         score_range = f"{(int(score) // 10) * 10}-{((int(score) // 10) + 1) * 10}"
@@ -388,18 +303,13 @@ def rank_stations_by_importance(infrastructure: Dict) -> Dict:
         'category_distribution': dict(category_counts),
         'type_distribution': dict(type_counts),
         'score_distribution': dict(score_ranges),
-        'ridership_data_sources': dict(ridership_sources),
-        'wikipedia_stations': len([s for s in all_stations if s.get('ridership_source') == 'wikipedia']),
-        'known_data_stations': len([s for s in all_stations if s.get('ridership_source') == 'known_data']),
         'top_10_stations': [
             {
                 'name': item['station']['name'],
                 'score': item['score'],
                 'category': item['station']['importance_category'],
                 'type': item['station']['station_type'],
-                'state': item['station'].get('state', 'Unknown'),
-                'ridership_source': item['station'].get('ridership_source', 'estimated'),
-                'daily_ridership': item['station'].get('actual_daily_ridership', 'N/A')
+                'state': item['station'].get('state', 'Unknown')
             }
             for item in station_importance[:10]
         ],
@@ -409,7 +319,6 @@ def rank_stations_by_importance(infrastructure: Dict) -> Dict:
     print(f"Station importance ranking complete!")
     print(f"  Average importance score: {infrastructure['station_rankings']['average_score']:.1f}")
     print(f"  Categories: {dict(category_counts)}")
-    print(f"  Ridership data sources: {dict(ridership_sources)}")
     print(f"  Top 3 stations: {[s['name'] for s in infrastructure['station_rankings']['top_10_stations'][:3]]}")
     
     return infrastructure
