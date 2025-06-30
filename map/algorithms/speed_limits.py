@@ -5,7 +5,13 @@ import time
 import os
 from typing import List, Tuple, Dict, Optional
 
-# Elevation API Configuration
+# Import the elevation manager for bulk elevation handling
+try:
+    from .elevation_manager import ElevationDataManager, preload_elevation_data
+except ImportError:
+    from elevation_manager import ElevationDataManager, preload_elevation_data
+
+# Configuration
 ELEVATION_API_URL = "https://api.open-elevation.com/api/v1/lookup"
 ELEVATION_API_MAX_POINTS = 50
 
@@ -395,9 +401,156 @@ def calculate_speed_limit(track_segment: Dict, all_stations: List[Dict]) -> Dict
         }
     }
 
+def calculate_speed_limit_with_elevation_cache(track_segment: Dict, all_stations: List[Dict], 
+                                             elevation_manager: ElevationDataManager) -> Dict:
+    """
+    Calculate realistic speed limit for a track segment using pre-loaded elevation data.
+    This version uses cached elevation data to avoid API rate limiting.
+    """
+    coords = track_segment['coords']
+    track_type = track_segment.get('type', 'other')
+    electrified = track_segment.get('electrified', False)
+    gauge = track_segment.get('gauge', '1676')  # Default broad gauge
+    
+    # Base speed limits by track type
+    base_speeds = {
+        'main': 130,      # Main lines (high-speed potential)
+        'branch': 100,    # Branch lines
+        'service': 50,    # Service/yard tracks
+        'industrial': 40, # Industrial tracks
+        'narrow_gauge': 80, # Narrow gauge limitations
+        'other': 80       # Default
+    }
+    
+    base_speed = base_speeds.get(track_type, 80)
+    
+    # Major South Indian cities for urban detection
+    major_cities = [
+        {'name': 'Chennai', 'lat': 13.0827, 'lon': 80.2707, 'radius': 30},
+        {'name': 'Bangalore', 'lat': 12.9716, 'lon': 77.5946, 'radius': 35},
+        {'name': 'Hyderabad', 'lat': 17.3850, 'lon': 78.4867, 'radius': 30},
+        {'name': 'Kochi', 'lat': 9.9312, 'lon': 76.2673, 'radius': 20},
+        {'name': 'Coimbatore', 'lat': 11.0168, 'lon': 76.9558, 'radius': 20},
+        {'name': 'Madurai', 'lat': 9.9252, 'lon': 78.1198, 'radius': 15},
+        {'name': 'Trivandrum', 'lat': 8.5241, 'lon': 76.9366, 'radius': 15}
+    ]
+    
+    # Calculate track characteristics using cached elevation data
+    total_distance = 0
+    total_elevation_change = 0
+    max_gradient = 0
+    urban_sections = 0
+    station_proximity_sections = 0
+    
+    # Get elevations for all points using cache
+    elevations = []
+    for lat, lon in coords:
+        elevation = elevation_manager.get_elevation(lat, lon)
+        elevations.append(elevation)
+    
+    # Analyze track segment
+    for i in range(len(coords) - 1):
+        lat1, lon1 = coords[i]
+        lat2, lon2 = coords[i + 1]
+        
+        # Distance calculation
+        segment_distance = calculate_distance(lat1, lon1, lat2, lon2)
+        total_distance += segment_distance
+        
+        # Elevation change and gradient using cached data
+        elev1, elev2 = elevations[i], elevations[i + 1]
+        elevation_change = abs(elev2 - elev1)
+        total_elevation_change += elevation_change
+        
+        if segment_distance > 0:
+            gradient = (elevation_change / 1000) / segment_distance  # Convert to rise/run
+            max_gradient = max(max_gradient, gradient)
+        
+        # Urban area detection
+        is_urban = any(
+            calculate_distance(lat1, lon1, city['lat'], city['lon']) <= city['radius']
+            for city in major_cities
+        )
+        if is_urban:
+            urban_sections += 1
+        
+        # Station proximity
+        near_station = any(
+            calculate_distance(lat1, lon1, station['lat'], station['lon']) <= 2.0
+            for station in all_stations
+        )
+        if near_station:
+            station_proximity_sections += 1
+    
+    # Speed adjustments based on analysis
+    speed_limit = base_speed
+    adjustments = []
+    
+    # Gradient penalty (steep gradients reduce speed)
+    if max_gradient > 0.03:  # 3% gradient
+        gradient_penalty = min(40, max_gradient * 1000)  # Up to 40 km/h reduction
+        speed_limit -= gradient_penalty
+        adjustments.append(f"Gradient penalty: -{gradient_penalty:.1f} km/h")
+    
+    # Urban area penalty
+    if urban_sections > len(coords) * 0.3:  # More than 30% in urban areas
+        urban_penalty = 30
+        speed_limit -= urban_penalty
+        adjustments.append(f"Urban area penalty: -{urban_penalty} km/h")
+    
+    # Station proximity penalty
+    if station_proximity_sections > len(coords) * 0.4:  # More than 40% near stations
+        station_penalty = 20
+        speed_limit -= station_penalty
+        adjustments.append(f"Station proximity penalty: -{station_penalty} km/h")
+    
+    # Electrification bonus
+    if electrified and track_type in ['main', 'branch']:
+        electrification_bonus = 20
+        speed_limit += electrification_bonus
+        adjustments.append(f"Electrification bonus: +{electrification_bonus} km/h")
+    
+    # Gauge adjustments
+    if gauge == '1000':  # Narrow gauge
+        gauge_penalty = 30
+        speed_limit -= gauge_penalty
+        adjustments.append(f"Narrow gauge penalty: -{gauge_penalty} km/h")
+    
+    # Minimum speed limits
+    min_speeds = {'service': 25, 'industrial': 20, 'other': 40}
+    speed_limit = max(speed_limit, min_speeds.get(track_type, 40))
+    
+    # Maximum speed limits for safety
+    max_speeds = {'main': 160, 'branch': 120, 'service': 60, 'industrial': 50, 'other': 100}
+    speed_limit = min(speed_limit, max_speeds.get(track_type, 100))
+    
+    # Classification
+    if speed_limit >= 100:
+        classification = 'high_speed'
+    elif speed_limit >= 80:
+        classification = 'medium_speed'
+    elif speed_limit >= 60:
+        classification = 'standard_speed'
+    else:
+        classification = 'low_speed'
+    
+    return {
+        'speed_limit_kmh': round(speed_limit),
+        'classification': classification,
+        'base_speed': base_speed,
+        'max_gradient': round(max_gradient * 100, 2),  # Convert to percentage
+        'total_elevation_change': round(total_elevation_change, 1),
+        'distance_km': round(total_distance, 2),
+        'urban_percentage': round((urban_sections / len(coords)) * 100, 1) if coords else 0,
+        'adjustments': adjustments,
+        'track_type': track_type,
+        'electrified': electrified,
+        'gauge': gauge
+    }
+
 def add_speed_limits_to_tracks(infrastructure: Dict) -> Dict:
     """
-    Add speed limits to all track segments in the infrastructure using free elevation APIs.
+    Add speed limits to all track segments in the infrastructure using pre-loaded elevation data.
     
     Args:
         infrastructure: Railway infrastructure data
@@ -405,14 +558,18 @@ def add_speed_limits_to_tracks(infrastructure: Dict) -> Dict:
     tracks = infrastructure.get('tracks', [])
     all_stations = infrastructure.get('stations', [])
     
-    print(f"Calculating speed limits with real elevation data for {len(tracks)} track segments...")
-    print("Using reliable free elevation APIs (OpenTopoData + Open-Elevation)...")
+    print(f"Calculating speed limits for {len(tracks)} track segments...")
     
+    # Pre-load all elevation data to avoid rate limiting
+    print("Pre-loading elevation data for all coordinates...")
+    elevation_manager = preload_elevation_data(infrastructure)
+    
+    print(f"Processing tracks with cached elevation data...")
     for i, track in enumerate(tracks):
-        if i % 50 == 0:  # Less frequent updates due to API calls
-            print(f"  Processing track {i+1}/{len(tracks)} (with elevation data)")
+        if i % 100 == 0:  # More frequent updates since no API delays
+            print(f"  Processing track {i+1}/{len(tracks)}")
         
-        speed_data = calculate_speed_limit(track, all_stations)
+        speed_data = calculate_speed_limit_with_elevation_cache(track, all_stations, elevation_manager)
         track.update(speed_data)
     
     # Generate summary statistics

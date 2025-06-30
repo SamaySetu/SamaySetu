@@ -170,13 +170,20 @@ def get_railway_data_by_state():
             all_elements.extend(data.get('elements', []))
             print(f"  Added {len(data.get('elements', []))} elements from {state_name}")
             
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:
+                print(f"  Rate limited for {state_name}. Please wait a few hours and try again.")
+                print(f"  Error: {e}")
+                break  # Stop processing other states to avoid more rate limiting
+            else:
+                print(f"  HTTP error for {state_name}: {e}")
         except requests.exceptions.Timeout:
             print(f"  Query timed out for {state_name}")
         except requests.exceptions.RequestException as e:
             print(f"  Request failed for {state_name}: {e}")
         
-        # Small delay between requests
-        time.sleep(1)
+        # Longer delay between requests to avoid rate limiting
+        time.sleep(3)
     
     return {"elements": all_elements}
 
@@ -334,8 +341,8 @@ def main():
             print(f"Warning: Could not import speed_limits module: {e}")
             print("Skipping speed limit calculations...")
         else:
-            print("Using Open-Elevation API (free, reliable)")
-            print("   Elevation functionality integrated in speed_limits module")
+            print("Using pre-loaded elevation data (no rate limiting!)")
+            print("   Elevation data will be cached for fast processing")
             infrastructure = add_speed_limits_to_tracks(infrastructure)
         
         # Calculate station importance rankings
